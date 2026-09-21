@@ -8,17 +8,33 @@ use std::path::Path;
 use std::path::PathBuf;
 
 #[derive(Debug, Parser)]
+#[clap(group(
+    clap::ArgGroup::new("features").required(true)
+))]
 struct Options {
-    #[arg(short, long, default_value_t = false)]
+    /// This flag activates the cleaning function. Nothing gets deleted if real_run is not set
+    #[arg(short, long, default_value_t = false, group = "features")]
     clean: bool,
-    #[arg(short, long, requires = "clean")]
+    /// This is the only required flag.
+    #[arg(short, long, required = true)]
     path: PathBuf,
+    /// If this flag is set, then all of the duplicates would get deleted
     #[arg(short, long, default_value_t = false, requires = "clean")]
     real_run: bool,
+    /// Makes clean remove all empty files as well
     #[arg(short = 'e', long, default_value_t = false, requires = "clean")]
     remove_empty_files: bool,
-    #[arg(short, long, default_value_t = false, conflicts_with = "clean")]
+    /// This is a feature which is unrelated to clean. this sorts the files by size.
+    #[arg(
+        short,
+        long,
+        default_value_t = false,
+        conflicts_with = "clean",
+        group = "features"
+    )]
     sort: bool,
+    /// This can specify how many files to show in the sort.
+    /// Gets the minimum of specified and the actual number of files
     #[arg(short, long, default_value_t = 20, requires = "sort")]
     num_sorting: usize,
 }
@@ -50,6 +66,7 @@ fn run_sort(files: &mut Vec<(u64, PathBuf)>, num_sorting: usize) -> &mut Vec<(u6
     files
 }
 
+/// Scans the FS from the root provided by the user. The Scan is being done via BFS
 fn populate_paths(
     path: &Path,
     remove_empty: bool,
