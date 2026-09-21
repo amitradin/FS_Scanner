@@ -2,7 +2,7 @@ use clap::Parser;
 use std::collections::{HashMap, hash_map};
 use std::fs::{self};
 use std::fs::{DirEntry, File};
-use std::io::{self, Read, Seek};
+use std::io::{self, Read, Seek, SeekFrom};
 use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 use std::path::PathBuf;
@@ -168,16 +168,9 @@ fn group_into_similar(files: Vec<(u64, PathBuf)>) -> HashMap<u64, Vec<PathBuf>> 
     mapping
 }
 /* since we don't want to compare the entire files at once (can be very wastful) we should instead
-* check each chunk at a time. so I'll read 4KB at a time
-* We also skip the first 4096 bytes as we cheched those*/
-fn compare_2_files(file1: &PathBuf, file2: &PathBuf, len: usize) -> Result<bool, std::io::Error> {
+* check each chunk at a time. so I'll read 4KB at a time */
+fn compare_2_files(file1: &mut File, file2: &mut File, len: usize) -> Result<bool, std::io::Error> {
     let mut remain = len;
-    let mut file1 = File::open(file1)?;
-    let mut file2 = File::open(file2)?;
-
-    // We need to skip the first 4096 bytes
-    file1.seek(std::io::SeekFrom::Start(4096))?;
-    file2.seek(std::io::SeekFrom::Start(4096))?;
     let mut chunk1 = [0u8; 4096];
     let mut chunk2 = [0u8; 4096];
 
@@ -203,8 +196,8 @@ fn scan_and_clean(
     len: usize,
     option: &Options,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    // We will also hash the first 4096 bytes of each file, then We could maybe avoid comparing the 2 files entirly, because
-    // likely The first 4096 Bytes won't be the same.
+    // A cache of first 4096 bytes of the file. This can help on small files. This can reduce that
+    // total reads from O(n^2) to O(n)
     let mut index_to_first_hash: HashMap<usize, [u8; 4096]> = HashMap::new();
     let prefix = len.min(4096) as usize;
     read_first_4096_bytes(&files, &mut index_to_first_hash, prefix)?;
@@ -239,7 +232,35 @@ fn scan_and_clean(
             // Otherwise, We don't want to read the entire first 4096 bytes again so we should start
             // from byte 4096
             if len > 4096 {
-                let comp2 = compare_2_files(curr_file, compare, (len - 4096) as usize);
+                let file1 = File::open(curr_file);
+                if let Err(e) = file1 {
+                    println!("Could not open {:?}, got an error {e}", curr_file);
+                    continue;
+                }
+                let mut file1 = file1.unwrap();
+                let seek = file1.seek(SeekFrom::Start(4096));
+                if let Err(e) = seek {
+                    println!(
+                        "Could not seek the first 4096 of {:?}, got an error {e}",
+                        curr_file
+                    );
+                    continue;
+                }
+                let file2 = File::open(compare);
+                if let Err(e) = file2 {
+                    println!("Could not open {:?}, got an error {e}", curr_file);
+                    continue;
+                }
+                let mut file2 = file2.unwrap();
+                let seek = file1.seek(SeekFrom::Start(4096));
+                if let Err(e) = seek {
+                    println!(
+                        "Could not seek the first 4096 of {:?}, got an error {e}",
+                        compare
+                    );
+                    continue;
+                }
+                let comp2 = compare_2_files(&mut file1, &mut file2, (len - 4096) as usize);
                 if let Err(e) = comp2 {
                     eprintln!(
                         "Could not compare {:?} and {:?}, got an error of {e}",
