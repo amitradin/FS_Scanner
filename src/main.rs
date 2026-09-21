@@ -2,7 +2,7 @@ use clap::Parser;
 use std::collections::{HashMap, hash_map};
 use std::fs::{self};
 use std::fs::{DirEntry, File};
-use std::io::{self, Read};
+use std::io::{self, Read, Seek};
 use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 use std::path::PathBuf;
@@ -49,10 +49,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     Ok(())
 }
-fn run_clean(files: Vec<(u64, PathBuf)>, option: &Options) -> Result<(), io::Error> {
+fn run_clean(
+    files: Vec<(u64, PathBuf)>,
+    option: &Options,
+) -> Result<(), Box<dyn std::error::Error>> {
     let files = group_into_similar(files);
     for item in files {
-        scan_and_clean(item.1, item.0, option)?;
+        scan_and_clean(item.1, item.0 as usize, option)?;
     }
     Ok(())
 }
@@ -132,6 +135,8 @@ fn populate_paths(
             } else if metadata.is_dir() {
                 let path = entry.path();
                 let mut is_bundle = false;
+                // When cleaning, we don't want to scan for bundles, as those directories usually
+                // contain duplicates
                 if is_clean {
                     is_bundle = path
                         .extension()
@@ -163,11 +168,16 @@ fn group_into_similar(files: Vec<(u64, PathBuf)>) -> HashMap<u64, Vec<PathBuf>> 
     mapping
 }
 /* since we don't want to compare the entire files at once (can be very wastful) we should instead
-* check each chunk at a time. so I'll read 4KB at a time */
+* check each chunk at a time. so I'll read 4KB at a time
+* We also skip the first 4096 bytes as we cheched those*/
 fn compare_2_files(file1: &PathBuf, file2: &PathBuf, len: usize) -> Result<bool, std::io::Error> {
     let mut remain = len;
     let mut file1 = File::open(file1)?;
     let mut file2 = File::open(file2)?;
+
+    // We need to skip the first 4096 bytes
+    file1.seek(std::io::SeekFrom::Start(4096))?;
+    file2.seek(std::io::SeekFrom::Start(4096))?;
     let mut chunk1 = [0u8; 4096];
     let mut chunk2 = [0u8; 4096];
 
@@ -188,7 +198,16 @@ fn compare_2_files(file1: &PathBuf, file2: &PathBuf, len: usize) -> Result<bool,
     Ok(true)
 }
 
-fn scan_and_clean(files: Vec<PathBuf>, len: u64, option: &Options) -> Result<(), io::Error> {
+fn scan_and_clean(
+    files: Vec<PathBuf>,
+    len: usize,
+    option: &Options,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // We will also hash the first 4096 bytes of each file, then We could maybe avoid comparing the 2 files entirly, because
+    // likely The first 4096 Bytes won't be the same.
+    let mut index_to_first_hash: HashMap<usize, [u8; 4096]> = HashMap::new();
+    let prefix = len.min(4096) as usize;
+    read_first_4096_bytes(&files, &mut index_to_first_hash, prefix)?;
     if len == 0 && option.remove_empty_files {
         delete_empty(files, option.real_run)?;
         return Ok(());
@@ -204,15 +223,33 @@ fn scan_and_clean(files: Vec<PathBuf>, len: u64, option: &Options) -> Result<(),
                 continue;
             }
             let compare = &files[j];
-            let comp = compare_2_files(curr_file, compare, len as usize);
-            if let Err(e) = comp {
-                eprintln!(
-                    "Could not compare {:?} and {:?}, got an error of {e}",
-                    curr_file, compare
-                );
+            if !index_to_first_hash.contains_key(&i) || !index_to_first_hash.contains_key(&j) {
                 continue;
             }
-            let comp = comp.unwrap();
+
+            // this unwrap will not failed as we checked if the keys are indeed in the map
+            let mut comp = index_to_first_hash.get(&i).unwrap()[0..prefix]
+                == index_to_first_hash.get(&j).unwrap()[0..prefix];
+            if !comp {
+                continue;
+            }
+
+            // if the file size is <= 4096 the the prefix check is all that was needed, and we do
+            // not need to read the entire file.
+            // Otherwise, We don't want to read the entire first 4096 bytes again so we should start
+            // from byte 4096
+            if len > 4096 {
+                let comp2 = compare_2_files(curr_file, compare, (len - 4096) as usize);
+                if let Err(e) = comp2 {
+                    eprintln!(
+                        "Could not compare {:?} and {:?}, got an error of {e}",
+                        curr_file, compare
+                    );
+                    continue;
+                }
+                comp = comp2.unwrap();
+            }
+
             if comp {
                 if option.real_run {
                     println!("Removing file {:?} it is equal to {:?}", compare, curr_file);
@@ -233,6 +270,28 @@ fn scan_and_clean(files: Vec<PathBuf>, len: u64, option: &Options) -> Result<(),
     Ok(())
 }
 
+fn read_first_4096_bytes(
+    files: &Vec<PathBuf>,
+    mapping: &mut HashMap<usize, [u8; 4096]>,
+    len: usize,
+) -> Result<(), io::Error> {
+    for i in 0..files.len() {
+        let mut buf = [0u8; 4096];
+        let curr = File::open(&files[i]);
+        if let Err(e) = curr.as_ref() {
+            println!("Could not open {:?}, got an error {e}", &files[i]);
+            continue;
+        }
+        let mut curr = curr.unwrap();
+        let read = curr.read_exact(&mut buf[0..len]);
+        if let Err(e) = read {
+            println!("Could not read {:?}, got an error {e}", &files[i]);
+            continue;
+        }
+        mapping.insert(i, buf);
+    }
+    Ok(())
+}
 fn delete_empty(empty_files: Vec<PathBuf>, real_run: bool) -> Result<(), io::Error> {
     for path in &empty_files {
         let file = File::open(path);
