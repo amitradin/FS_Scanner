@@ -1,344 +1,497 @@
-use clap::Parser;
-use std::collections::{HashMap, hash_map};
-use std::fs::{self};
-use std::fs::{DirEntry, File};
-use std::io::{self, Read, Seek, SeekFrom};
-use std::os::unix::fs::MetadataExt;
-use std::path::Path;
+mod tools;
+
+use std::io;
 use std::path::PathBuf;
 
-#[derive(Debug, Parser)]
-#[clap(group(
-    clap::ArgGroup::new("features").required(true)
-))]
-struct Options {
-    /// This flag activates the cleaning function. Nothing gets deleted if real_run is not set
-    #[arg(short, long, default_value_t = false, group = "features")]
-    clean: bool,
-    /// This is the only required flag.
-    #[arg(short, long, required = true)]
-    path: PathBuf,
-    /// If this flag is set, then all of the duplicates would get deleted
-    #[arg(short, long, default_value_t = false, requires = "clean")]
+use crossterm::event::{KeyCode, KeyEvent, KeyEventKind};
+use ratatui::{
+    DefaultTerminal, Frame,
+    layout::{Constraint, Layout},
+    prelude::{Buffer, Rect},
+    style::{Style, Stylize},
+    text::Line,
+    widgets::{Block, List, ListItem, ListState, Paragraph, StatefulWidget, Widget},
+};
+
+/*
+useclap::{Parser, error::Result};
+use tools::Options;
+use tools::{populate_paths, run_clean, run_sort}; */
+
+// The main struct.Hold info about the state of the entire TUI
+struct App {
+    exit: bool,
+    menu: MenuState,
+    clean: CleanState,
+    curr_screen: Screen,
+}
+// Current screen selected
+#[derive(Clone, Copy, PartialEq)]
+enum Screen {
+    Main,
+    CleanOptions,
+}
+
+// Menu items of the main menu
+const MENU_ITEMS: [&str; 2] = ["Clean", "Sort"];
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct MenuState {
+    list: ListState,
+}
+impl MenuState {
+    // Creating a new state and choosing the first option by default
+    fn new() -> Self {
+        let mut state = ListState::default();
+        state.select(Some(0));
+        MenuState { list: state }
+    }
+    // move to the next item
+    fn next(&mut self) {
+        let i = match self.list.selected() {
+            Some(i) => {
+                if i >= MENU_ITEMS.len() - 1 {
+                    0
+                } else {
+                    i + 1
+                }
+            }
+            None => 0,
+        };
+        self.list.select(Some(i));
+    }
+    // move to the previous item
+    fn prev(&mut self) {
+        let i = match self.list.selected() {
+            Some(i) => {
+                if i == 0 {
+                    MENU_ITEMS.len() - 1
+                } else {
+                    i - 1
+                }
+            }
+            None => 0,
+        };
+        self.list.select(Some(i));
+    }
+    // gets the selected option (index)
+    fn selected(&self) -> Option<usize> {
+        self.list.selected()
+    }
+}
+
+// Holds the data about the clean screen
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct CleanState {
     real_run: bool,
-    /// Makes clean remove all empty files as well
-    #[arg(short = 'e', long, default_value_t = false, requires = "clean")]
-    remove_empty_files: bool,
-    /// This is a feature which is unrelated to clean. this sorts the files by size.
-    #[arg(
-        short,
-        long,
-        default_value_t = false,
-        conflicts_with = "clean",
-        group = "features"
-    )]
-    sort: bool,
-    /// This can specify how many files to show in the sort.
-    /// Gets the minimum of specified and the actual number of files
-    #[arg(short, long, default_value_t = 20, requires = "sort")]
-    num_sorting: usize,
+    remove_empty: bool,
+    path: String,
+    error: Option<String>,
+    focus: Row,
+}
+impl CleanState {
+    // a default method. gets a path.
+    fn new(path: String) -> Self {
+        CleanState {
+            real_run: false,
+            remove_empty: false,
+            path: path,
+            focus: Row::RealRun,
+            error: None,
+        }
+    }
+    // move to the next option
+    fn next(&mut self) {
+        self.error = None;
+        let i = self.focus.index();
+
+        if i >= Row::ALL.len() - 1 {
+            self.focus = Row::from_index(0).unwrap_or(Row::RealRun);
+        } else {
+            self.focus = Row::from_index(i + 1).unwrap_or(Row::RealRun);
+        }
+    }
+    // move to the previous option
+    fn prev(&mut self) {
+        self.error = None;
+        let i = self.focus.index();
+
+        if i == 0 {
+            //wrap
+            self.focus = Row::from_index(Row::ALL.len() - 1).unwrap_or(Row::RealRun);
+        } else {
+            self.focus = Row::from_index(i - 1).unwrap_or(Row::RealRun);
+        }
+    }
+    // Maps row to a label (Becuase only toggles will show up in the list We only worry about them)
+    fn label(&self, row: Row) -> String {
+        match row {
+            Row::RealRun => match self.real_run {
+                true => format!("[x] {}", row.name()),
+                false => format!("[ ] {}", row.name()),
+            },
+            Row::RemoveEmpty => match self.remove_empty {
+                true => format!("[x] {}", row.name()),
+                false => format!("[ ] {}", row.name()),
+            },
+            _ => String::from(""),
+        }
+    }
+    // On each action we should mutate the state of the struct
+    fn activate(&mut self) -> Action {
+        self.error = None;
+        match self.focus {
+            Row::RealRun => {
+                self.real_run = !self.real_run;
+                Action::Noop
+            }
+            Row::RemoveEmpty => {
+                self.remove_empty = !self.remove_empty;
+                Action::Noop
+            }
+            Row::Path => {
+                self.focus = Row::Run;
+                Action::Noop
+            }
+            Row::Run => {
+                let trimmed = &self.path.trim();
+                if trimmed.is_empty() {
+                    self.error = Some(String::from("Path does not exist"));
+                    return Action::Noop;
+                }
+                let path = PathBuf::from(trimmed);
+                if path.is_dir() {
+                    Action::Run {
+                        path,
+                        remove_empty: self.remove_empty,
+                        real_run: self.real_run,
+                    }
+                } else {
+                    self.error = Some(String::from("Provided path is not a valid directory"));
+                    Action::Noop
+                }
+            }
+        }
+    }
+    fn push_char(&mut self, ch: char) {
+        self.path.push(ch);
+    }
+    fn backspace(&mut self) {
+        self.path.pop();
+    }
+    fn is_valid_path(&self) -> bool {
+        let trimmed = &self.path.trim();
+        if trimmed.is_empty() {
+            return false;
+        }
+        if !PathBuf::from(trimmed).is_dir() {
+            return false;
+        }
+        true
+    }
+}
+
+// A very simple struct that holds info about the action of the user
+// Only data is held when the user want to run. The data Will be gotten from the CleanState struct
+#[derive(Debug)]
+enum Action {
+    Run {
+        path: std::path::PathBuf,
+        remove_empty: bool,
+        real_run: bool,
+    },
+    Noop,
+}
+
+// All of the options of Clean options screen
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Row {
+    RealRun,
+    RemoveEmpty,
+    Path,
+    Run,
+}
+
+impl Row {
+    // All of the row options such that it would be easier to index into
+    const ALL: [Row; 4] = [Row::RealRun, Row::RemoveEmpty, Row::Path, Row::Run];
+    fn from_index(i: usize) -> Option<Row> {
+        Self::ALL.get(i).copied()
+    }
+    // maps row to name
+    fn name(self) -> &'static str {
+        match self {
+            Row::RealRun => "Real run (Will delete items)",
+            Row::RemoveEmpty => "Remove empty files",
+            Row::Path => "Path",
+            Row::Run => "Run",
+        }
+    }
+    fn is_toggle(self) -> bool {
+        match self {
+            Row::RealRun => true,
+            Row::RemoveEmpty => true,
+            _ => false,
+        }
+    }
+    // maps row to hint (when hovering)
+    fn hint(self) -> &'static str {
+        match self {
+            Row::RealRun => "space: toggle - WARNING: (deletes files for real)",
+            Row::RemoveEmpty => "space: toggle- also delete zero-byte files",
+            Row::Path => "Type to edit",
+            Row::Run => "enter: start the scan",
+        }
+    }
+    fn index(self) -> usize {
+        Row::ALL.iter().position(|r| *r == self).unwrap_or(0)
+    }
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let op = Options::parse();
+    /*let op = Options::parse();
     let mut files = populate_paths(&op.path, op.remove_empty_files, op.clean)?;
     if op.clean {
         run_clean(files, &op)?;
     } else {
         run_sort(&mut files, op.num_sorting);
-    }
-    Ok(())
-}
-fn run_clean(
-    files: Vec<(u64, PathBuf)>,
-    option: &Options,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let files = group_into_similar(files);
-    for item in files {
-        scan_and_clean(item.1, item.0 as usize, option)?;
-    }
-    Ok(())
-}
-fn run_sort(files: &mut Vec<(u64, PathBuf)>, num_sorting: usize) -> &mut Vec<(u64, PathBuf)> {
-    files.sort_by(|a, b| b.0.cmp(&a.0));
-    let len = num_sorting.min(files.len());
-    for i in 0..len {
-        let curr = files.get(i).unwrap();
-        println!("{:.2}MB : {:?}", (curr.0 as f64 / 1_000_000.0), curr.1)
-    }
-    files
+    } */
+    let mut terminal = ratatui::init();
+    let mut app = App {
+        exit: false,
+        menu: MenuState::new(),
+        clean: CleanState::new(String::from("")),
+        curr_screen: Screen::Main,
+    };
+    let app_res = app.run(&mut terminal);
+    ratatui::restore();
+    Ok(app_res?)
 }
 
-/// Scans the FS from the root provided by the user. The Scan is being done via BFS
-fn populate_paths(
-    path: &Path,
-    remove_empty: bool,
-    is_clean: bool,
-) -> Result<Vec<(u64, PathBuf)>, std::io::Error> {
-    const BUNDLE_EXTS: &[&str] = &[
-        "app",
-        "framework",
-        "bundle",
-        "xpc",
-        "plugin",
-        "appex",
-        "kext",
-        "prefPane",
-        "qlgenerator",
-    ];
-    let mut dir_paths: Vec<PathBuf> = vec![path.to_path_buf()];
-    let mut file_paths: Vec<(u64, PathBuf)> = Vec::new();
-    while let Some(curr_dir) = dir_paths.pop() {
-        let tester = fs::read_dir(&curr_dir);
-        if let Err(e) = tester {
-            eprintln!("Could not read {curr_dir:?}, moving to the next, Error was: {e:?}");
-            continue;
-        }
-        let curr_dir: Vec<DirEntry> = tester
-            .unwrap() // Safe becuase checked
-            .filter_map(|entry| entry.ok().filter(|e| e.file_type().is_ok()))
-            .filter(|entry| {
-                entry
-                    .file_name()
-                    .to_str()
-                    .map(|s| {
-                        !s.starts_with('.')
-                            && (entry.file_type().unwrap().is_file() || s != "target")
-                    })
-                    .unwrap_or(false)
-            })
-            .collect();
-        for entry in curr_dir {
-            // this will not fail as we filtered for erros in file_type
-            let file_type = entry.file_type().unwrap();
-            // We should skip symlinks since the metadata is fucked.
-            if file_type.is_symlink() {
-                continue;
-            }
-
-            let metadata = entry.metadata();
-            if let Err(e) = metadata {
-                eprintln!(
-                    "Could not access the metadata of {:?}, got an error of {e}",
-                    entry.path()
-                );
-                continue;
-            }
-            let metadata = metadata.unwrap();
-            if metadata.file_type().is_file() {
-                // HardLink
-                if metadata.nlink() > 1 {
-                    continue;
-                } else if metadata.len() > 0 || remove_empty {
-                    file_paths.push((metadata.len(), entry.path()));
-                }
-            } else if metadata.is_dir() {
-                let path = entry.path();
-                let mut is_bundle = false;
-                // When cleaning, we don't want to scan for bundles, as those directories usually
-                // contain duplicates
-                if is_clean {
-                    is_bundle = path
-                        .extension()
-                        .and_then(|e| e.to_str())
-                        .is_some_and(|e| BUNDLE_EXTS.iter().any(|b| b.eq_ignore_ascii_case(e)));
-                }
-                if is_bundle {
-                    eprintln!(
-                        "Skipping bundle {path:?} (deleting it might break the corresponding app)"
-                    );
-                    continue;
-                }
-                dir_paths.push(entry.path());
+impl App {
+    // Runs the app
+    fn run(&mut self, terminal: &mut DefaultTerminal) -> io::Result<()> {
+        while !self.exit {
+            terminal.draw(|frame| self.draw(frame))?;
+            match crossterm::event::read()? {
+                crossterm::event::Event::Key(key) => self.handle_key(key)?,
+                _ => {}
             }
         }
+        Ok(())
     }
-    Ok(file_paths)
-}
-
-fn group_into_similar(files: Vec<(u64, PathBuf)>) -> HashMap<u64, Vec<PathBuf>> {
-    let mut mapping: HashMap<u64, Vec<PathBuf>> = HashMap::new();
-    for item in files {
-        if let hash_map::Entry::Vacant(e) = mapping.entry(item.0) {
-            e.insert(vec![item.1]);
-        } else {
-            mapping.get_mut(&item.0).unwrap().push(item.1)
-        }
+    // draws the screen
+    fn draw(&mut self, frame: &mut Frame) {
+        frame.render_widget(self, frame.area());
     }
-    mapping
-}
-/* since we don't want to compare the entire files at once (can be very wastful) we should instead
-* check each chunk at a time. so I'll read 4KB at a time */
-fn compare_2_files(file1: &mut File, file2: &mut File, len: usize) -> Result<bool, std::io::Error> {
-    let mut remain = len;
-    let mut chunk1 = [0u8; 4096];
-    let mut chunk2 = [0u8; 4096];
-
-    // If size has changed since gropued
-    if file1.metadata()?.len() != file2.metadata()?.len() {
-        return Ok(false);
-    }
-    while remain > 0 {
-        let n = remain.min(4096);
-        file1.read_exact(&mut chunk1[0..n])?;
-        file2.read_exact(&mut chunk2[0..n])?;
-        if chunk1[0..n] != chunk2[0..n] {
-            return Ok(false);
-        }
-        remain -= n;
-    }
-
-    Ok(true)
-}
-
-fn scan_and_clean(
-    files: Vec<PathBuf>,
-    len: usize,
-    option: &Options,
-) -> Result<(), Box<dyn std::error::Error>> {
-    // A cache of first 4096 bytes of the file. This can help on small files. This can reduce that
-    // total reads from O(n^2) to O(n)
-    let mut index_to_first_hash: HashMap<usize, [u8; 4096]> = HashMap::new();
-    let prefix = len.min(4096) as usize;
-    read_first_4096_bytes(&files, &mut index_to_first_hash, prefix)?;
-    if len == 0 && option.remove_empty_files {
-        delete_empty(files, option.real_run)?;
-        return Ok(());
-    }
-    let mut gone_over = vec![false; files.len()];
-    for i in 0..files.len() {
-        if gone_over[i] {
-            continue;
-        }
-        let curr_file = &files[i];
-        for j in (i + 1)..files.len() {
-            if gone_over[j] {
-                continue;
-            }
-            let compare = &files[j];
-            if !index_to_first_hash.contains_key(&i) || !index_to_first_hash.contains_key(&j) {
-                continue;
-            }
-
-            // this unwrap will not failed as we checked if the keys are indeed in the map
-            let mut comp = index_to_first_hash.get(&i).unwrap()[0..prefix]
-                == index_to_first_hash.get(&j).unwrap()[0..prefix];
-            if !comp {
-                continue;
-            }
-
-            // if the file size is <= 4096 the the prefix check is all that was needed, and we do
-            // not need to read the entire file.
-            // Otherwise, We don't want to read the entire first 4096 bytes again so we should start
-            // from byte 4096
-            if len > 4096 {
-                let file1 = File::open(curr_file);
-                if let Err(e) = file1 {
-                    println!("Could not open {:?}, got an error {e}", curr_file);
-                    continue;
-                }
-                let mut file1 = file1.unwrap();
-                let seek = file1.seek(SeekFrom::Start(4096));
-                if let Err(e) = seek {
-                    println!(
-                        "Could not seek the first 4096 of {:?}, got an error {e}",
-                        curr_file
-                    );
-                    continue;
-                }
-                let file2 = File::open(compare);
-                if let Err(e) = file2 {
-                    println!("Could not open {:?}, got an error {e}", curr_file);
-                    continue;
-                }
-                let mut file2 = file2.unwrap();
-                let seek = file1.seek(SeekFrom::Start(4096));
-                if let Err(e) = seek {
-                    println!(
-                        "Could not seek the first 4096 of {:?}, got an error {e}",
-                        compare
-                    );
-                    continue;
-                }
-                let comp2 = compare_2_files(&mut file1, &mut file2, (len - 4096) as usize);
-                if let Err(e) = comp2 {
-                    eprintln!(
-                        "Could not compare {:?} and {:?}, got an error of {e}",
-                        curr_file, compare
-                    );
-                    continue;
-                }
-                comp = comp2.unwrap();
-            }
-
-            if comp {
-                if option.real_run {
-                    println!("Removing file {:?} it is equal to {:?}", compare, curr_file);
-                    if let Err(e) = fs::remove_file(compare) {
-                        eprintln!("Could not delete {:?}, got an Error {e}", { compare });
-                        continue;
+    // handdles key press
+    fn handle_key(&mut self, key: KeyEvent) -> io::Result<()> {
+        if key.kind == KeyEventKind::Press {
+            match self.curr_screen {
+                Screen::Main => {
+                    if key.code == KeyCode::Char('q') {
+                        self.exit = true;
+                    } else if key.code == KeyCode::Char('j')
+                        || key.code == KeyCode::Tab
+                        || key.code == KeyCode::Down
+                    {
+                        self.menu.next();
+                    } else if key.code == KeyCode::Char('k')
+                        || key.code == KeyCode::BackTab
+                        || key.code == KeyCode::Up
+                    {
+                        self.menu.prev();
                     }
-                } else {
-                    println!(
-                        "This is a dry run, would remove file {:?} it is equal to {:?}",
-                        compare, curr_file
-                    )
+                    if key.code == KeyCode::Enter {
+                        match self.menu.selected() {
+                            Some(0) => self.curr_screen = Screen::CleanOptions,
+                            _ => {}
+                        }
+                    }
                 }
-                gone_over[j] = true;
+
+                Screen::CleanOptions => {
+                    if key.code == KeyCode::Esc {
+                        self.curr_screen = Screen::Main;
+                        self.clean.focus = Row::RealRun;
+                        return Ok(());
+                    } else if key.code == KeyCode::Down || key.code == KeyCode::Tab {
+                        self.clean.next();
+                        return Ok(());
+                    } else if key.code == KeyCode::Up || key.code == KeyCode::BackTab {
+                        self.clean.prev();
+                        return Ok(());
+                    }
+
+                    if self.clean.focus == Row::Path {
+                        match key.code {
+                            KeyCode::Char(c) if key.modifiers.is_empty() => self.clean.push_char(c),
+                            KeyCode::Backspace => self.clean.backspace(),
+                            KeyCode::Enter => self.clean.next(),
+                            _ => (),
+                        }
+                    } else {
+                        if key.code == KeyCode::Char('j') {
+                            self.clean.next();
+                        }
+                        if key.code == KeyCode::Char('k') {
+                            self.clean.prev();
+                        }
+                        if key.code == KeyCode::Char(' ') {
+                            if self.clean.focus.is_toggle() {
+                                self.clean.activate();
+                            }
+                        } else if key.code == KeyCode::Enter {
+                            match self.clean.focus {
+                                Row::Run => {
+                                    let action = self.clean.activate();
+                                    match action {
+                                        Action::Noop => (),
+                                        Action::Run { .. } => (),
+                                    }
+                                }
+                                _ => (),
+                            }
+                        }
+                    }
+                }
             }
         }
+        Ok(())
     }
-    Ok(())
+}
+impl Widget for &mut App {
+    fn render(self, area: Rect, buf: &mut Buffer)
+    where
+        Self: Sized,
+    {
+        let vertical_layout = Layout::vertical([
+            Constraint::Length(1),
+            Constraint::Min(0),
+            Constraint::Length(4),
+        ]);
+
+        let [title, body, footer] = vertical_layout.areas(area);
+
+        match self.curr_screen {
+            Screen::Main => render_menu(buf, &mut self.menu.list, title, body, footer),
+            Screen::CleanOptions => render_clean(buf, &mut self.clean, title, body, footer),
+        }
+    }
 }
 
-fn read_first_4096_bytes(
-    files: &Vec<PathBuf>,
-    mapping: &mut HashMap<usize, [u8; 4096]>,
-    len: usize,
-) -> Result<(), io::Error> {
-    for i in 0..files.len() {
-        let mut buf = [0u8; 4096];
-        let curr = File::open(&files[i]);
-        if let Err(e) = curr.as_ref() {
-            println!("Could not open {:?}, got an error {e}", &files[i]);
-            continue;
-        }
-        let mut curr = curr.unwrap();
-        let read = curr.read_exact(&mut buf[0..len]);
-        if let Err(e) = read {
-            println!("Could not read {:?}, got an error {e}", &files[i]);
-            continue;
-        }
-        mapping.insert(i, buf);
-    }
-    Ok(())
-}
-fn delete_empty(empty_files: Vec<PathBuf>, real_run: bool) -> Result<(), io::Error> {
-    for path in &empty_files {
-        let file = File::open(path);
-        if let Err(e) = file.as_ref() {
-            println!("Could not open {:?}, got an erorr {e}", path);
-        }
-        let file = file.unwrap();
+fn render_menu(buf: &mut Buffer, state: &mut ListState, title: Rect, body: Rect, footer: Rect) {
+    let items = MENU_ITEMS
+        .into_iter()
+        .map(|i| ListItem::new(i))
+        .collect::<Vec<ListItem>>();
+    let list = List::new(items)
+        .highlight_style(Style::new().reversed())
+        .highlight_symbol(">>");
 
-        let metadata = file.metadata();
-        if let Err(e) = metadata {
-            eprintln!("Could not get the metadata of {:?}, got an error {e}", path);
-            continue;
+    Line::from("FS Scanner")
+        .bold()
+        .centered()
+        .render(title, buf);
+    let outer_block = Block::bordered();
+    let inner_area = outer_block.inner(body);
+    outer_block.render(body, buf);
+    StatefulWidget::render(list, inner_area, buf, state);
+
+    let footer_block = Block::bordered();
+    let inner_footer = footer_block.inner(footer);
+    footer_block.render(footer, buf);
+    Line::from("J - Down       K - Up       Enter - Select")
+        .bold()
+        .centered()
+        .render(inner_footer, buf);
+}
+fn render_clean(buf: &mut Buffer, options: &mut CleanState, title: Rect, body: Rect, footer: Rect) {
+    Line::from("Clean Options")
+        .bold()
+        .centered()
+        .render(title, buf);
+
+    let vertical_body = Layout::vertical([
+        Constraint::Length(4),
+        Constraint::Length(3),
+        Constraint::Length(3),
+        Constraint::Min(0),
+    ]);
+
+    let [toggles, path, run, _] = vertical_body.areas(body);
+    let mut lines = Vec::new();
+    match options.focus {
+        Row::RealRun => {
+            lines.push(
+                Line::from(format!(">> {}", options.label(Row::RealRun)))
+                    .bold()
+                    .reversed(),
+            );
+            lines.push(Line::from(format!("   {}", options.label(Row::RemoveEmpty))).bold());
         }
-        let metadata = metadata.unwrap();
-        if metadata.len() == 0 {
-            if real_run {
-                if let Err(e) = fs::remove_file(path) {
-                    eprintln!("Could not remove {:?}, got an error {e}", path);
-                    continue;
-                } else {
-                    println!("Removed empty file: {:?}", path);
-                }
-            } else {
-                println!("This is a dry run, would remove file {:?}", path)
-            }
+        Row::RemoveEmpty => {
+            lines.push(Line::from(format!("   {}", options.label(Row::RealRun))).bold());
+            lines.push(
+                Line::from(format!(">> {}", options.label(Row::RemoveEmpty)))
+                    .reversed()
+                    .bold(),
+            );
+        }
+        _ => {
+            lines.push(Line::from(format!("   {}", options.label(Row::RealRun))).bold());
+            lines.push(Line::from(format!("   {}", options.label(Row::RemoveEmpty))).bold());
         }
     }
-    Ok(())
+    let mut toggle_block = Block::bordered().title("Toggles");
+    if options.focus.is_toggle() {
+        toggle_block = toggle_block.border_style(Style::new().green());
+    }
+    let inner_toggle = toggle_block.inner(toggles);
+    toggle_block.render(toggles, buf);
+    Paragraph::new(lines).render(inner_toggle, buf);
+
+    let mut para_block = Block::bordered().title(Row::Path.name());
+    if options.focus == Row::Path {
+        if options.is_valid_path() {
+            para_block = para_block.border_style(Style::new().green());
+        } else {
+            para_block = para_block.border_style(Style::new().red());
+        }
+    }
+
+    let inner_para = para_block.inner(path);
+    para_block.render(path, buf);
+    Paragraph::new(options.path.as_str()).render(inner_para, buf);
+
+    let mut run_block = Block::bordered();
+    if options.focus == Row::Run {
+        run_block = run_block.border_style(Style::new().green());
+    }
+    let inner_run = run_block.inner(run);
+    run_block.render(run, buf);
+    Line::from("Run").render(inner_run, buf);
+
+    let footer_block = Block::bordered();
+    let inner_footer = footer_block.inner(footer);
+    footer_block.render(footer, buf);
+    let mut text = Vec::new();
+    let line = match options.focus {
+        Row::Path => {
+            Line::from("ESC- Go back       Tab/DownArrow - Down       BackTab/UpArrow - Up")
+                .centered()
+                .bold()
+        }
+        _ => Line::from("ESC- Go back       J/Tab/DownArrow - Down       K/BackTab/UpArrow - Up")
+            .centered()
+            .bold(),
+    };
+    text.push(line);
+    let mut second_line = match &options.error {
+        Some(e) => Line::from(e.as_str().red()),
+        None => Line::from(options.focus.hint()),
+    };
+    second_line = second_line.centered().bold();
+    text.push(second_line);
+
+    Paragraph::new(text).render(inner_footer, buf);
 }
