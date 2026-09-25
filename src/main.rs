@@ -26,6 +26,7 @@ struct App {
     clean: CleanState,
     run_state: RunState,
     curr_screen: Screen,
+    result_state: ResultStatus,
 }
 
 /// This struct saves the state of the current running clean job
@@ -37,9 +38,7 @@ struct RunState {
     real_run: bool,
     remove_empty: bool,
     path: PathBuf,
-    scroll: ListState,
     tick: u64,
-    result: Option<CleanReport>,
 }
 
 // Menu items of the main menu
@@ -67,6 +66,14 @@ enum Status {
     Running,
     Finished,
     Failed(String),
+}
+
+#[derive(Default)]
+struct ResultStatus {
+    pos_succ: ListState,
+    pos_fail: ListState,
+    output: Option<CleanReport>,
+    fail_focus: bool,
 }
 
 /// Current screen selected
@@ -389,9 +396,7 @@ impl App {
                                                 real_run,
                                                 remove_empty,
                                                 path: path.clone(),
-                                                scroll: ListState::default(),
                                                 tick: 0,
-                                                result: None,
                                             };
 
                                             std::thread::spawn(move || {
@@ -407,9 +412,29 @@ impl App {
                         }
                     }
                 }
-                _ => {
+                Screen::RunningClean => {
                     if key.code == KeyCode::Char('q') {
                         self.exit = true;
+                    }
+                }
+                Screen::CleanResults => {
+                    if key.code == KeyCode::Char('q') {
+                        self.exit = true;
+                    }
+                    if key.code == KeyCode::Char('j') || key.code == KeyCode::Down {
+                        self.result_state.next();
+                    }
+                    if key.code == KeyCode::Char('k') || key.code == KeyCode::Up {
+                        self.result_state.prev();
+                    }
+                    if key.code == KeyCode::Tab {
+                        self.result_state.fail_focus = !self.result_state.fail_focus;
+                    }
+                    if key.code == KeyCode::PageUp {
+                        self.result_state.reset_to_zero();
+                    }
+                    if key.code == KeyCode::PageDown {
+                        self.result_state.move_to_end();
                     }
                 }
             }
@@ -433,14 +458,31 @@ impl App {
                             self.run_state.log_lines.push(s);
                         }
                         Message::Done(Ok(report)) => {
-                            self.run_state.result = Some(report);
+                            if report.success.len() > 0 {
+                                self.result_state.pos_succ.select(Some(0));
+                            } else {
+                                self.result_state.pos_succ.select(None);
+                            }
+
+                            if report.errors.len() > 0 {
+                                self.result_state.pos_fail.select(Some(0));
+                            } else {
+                                self.result_state.pos_fail.select(None);
+                            }
+                            self.result_state.fail_focus = false;
+
+                            self.result_state.output = Some(report);
                             self.run_state.status = Status::Finished;
                             self.curr_screen = Screen::CleanResults;
+
                             return;
                         }
                         Message::Done(Err(e)) => {
                             self.run_state.status = Status::Failed(e);
                             self.curr_screen = Screen::CleanResults;
+                            self.result_state.pos_succ.select(Some(0));
+                            self.result_state.pos_fail.select(Some(0));
+                            self.result_state.fail_focus = false;
                             return;
                         }
                     },
@@ -482,6 +524,91 @@ impl Widget for &mut App {
             Screen::RunningClean => {
                 render_running_clean(buf, &mut self.run_state, title, body, footer)
             }
+            Screen::CleanResults => {
+                render_results_screen(buf, &mut self.result_state, title, body, footer)
+            }
+        }
+    }
+}
+
+impl ResultStatus {
+    fn next(&mut self) {
+        if self.output.is_none() {
+            return;
+        }
+        match self.fail_focus {
+            false if self.output.as_ref().unwrap().success.len() > 0 => {
+                let curr = self.pos_succ.selected().unwrap_or(0);
+                if curr >= self.output.as_ref().unwrap().success.len() - 1 {
+                    self.pos_succ.select(Some(0));
+                } else {
+                    self.pos_succ.select(Some(curr + 1));
+                }
+            }
+            true if self.output.as_ref().unwrap().errors.len() > 0 => {
+                let curr = self.pos_fail.selected().unwrap_or(0);
+                if curr >= self.output.as_ref().unwrap().errors.len() - 1 {
+                    self.pos_fail.select(Some(0));
+                } else {
+                    self.pos_fail.select(Some(curr + 1));
+                }
+            }
+            _ => (),
+        }
+    }
+
+    fn prev(&mut self) {
+        if self.output.is_none() {
+            return;
+        }
+        match self.fail_focus {
+            false if self.output.as_ref().unwrap().success.len() > 0 => {
+                let curr = self.pos_succ.selected().unwrap_or(0);
+                if curr == 0 {
+                    self.pos_succ
+                        .select(Some(self.output.as_ref().unwrap().success.len() - 1));
+                } else {
+                    self.pos_succ.select(Some(curr - 1));
+                }
+            }
+            true => {
+                if self.output.as_ref().unwrap().errors.len() > 0 {
+                    let curr = self.pos_fail.selected().unwrap_or(0);
+                    if curr == 0 {
+                        self.pos_fail
+                            .select(Some(self.output.as_ref().unwrap().errors.len() - 1));
+                    } else {
+                        self.pos_fail.select(Some(curr - 1));
+                    }
+                }
+            }
+            _ => (),
+        }
+    }
+    fn reset_to_zero(&mut self) {
+        if self.output.is_none() {
+            return;
+        }
+        match self.fail_focus {
+            false if self.output.as_ref().unwrap().success.len() > 0 => {
+                self.pos_succ.select(Some(0))
+            }
+            true if self.output.as_ref().unwrap().errors.len() > 0 => self.pos_fail.select(Some(0)),
+            _ => (),
+        }
+    }
+
+    fn move_to_end(&mut self) {
+        if self.output.is_none() {
+            return;
+        }
+        match self.fail_focus {
+            false if self.output.as_ref().unwrap().success.len() > 0 => self
+                .pos_succ
+                .select(Some(self.output.as_ref().unwrap().success.len() - 1)),
+            true if self.output.as_ref().unwrap().errors.len() > 0 => self
+                .pos_fail
+                .select(Some(self.output.as_ref().unwrap().errors.len() - 1)),
             _ => (),
         }
     }
@@ -675,9 +802,74 @@ fn render_running_clean(
 
     Widget::render(List::new(last_items), inner_log, buf);
 
-    Paragraph::new(Line::from("q - Quit").bold().centered())
+    Paragraph::new(Line::from("q - quit").bold().centered())
         .block(Block::bordered())
         .render(footer, buf);
+}
+
+fn render_results_screen(
+    buf: &mut Buffer,
+    state: &mut ResultStatus,
+    title: Rect,
+    body: Rect,
+    footer: Rect,
+) {
+    Line::from("Clean Results")
+        .bold()
+        .centered()
+        .render(title, buf);
+
+    if state.output.is_none() {
+        return;
+    }
+
+    let report = state.output.as_ref().unwrap();
+
+    let succ_items = report
+        .success
+        .iter()
+        .map(|item| ListItem::new(item.as_str()))
+        .collect::<List>();
+
+    let mut succ_items = succ_items
+        .block(Block::bordered().title("Success Output"))
+        .highlight_style(Style::new().reversed())
+        .highlight_symbol(">>");
+
+    let err_items = report
+        .errors
+        .iter()
+        .map(|item| ListItem::new(item.as_str()))
+        .collect::<List>();
+
+    let mut err_items = err_items
+        .block(Block::bordered().title("Error Output"))
+        .highlight_style(Style::new().reversed())
+        .highlight_symbol(">>");
+
+    if state.fail_focus {
+        err_items = err_items.block(
+            Block::bordered()
+                .title("Error Output")
+                .border_style(Style::new().green()),
+        );
+    } else {
+        succ_items = succ_items.block(
+            Block::bordered()
+                .title("Success Output")
+                .border_style(Style::new().green()),
+        );
+    }
+
+    let output_split = Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)]);
+    let [succ_area, fail_area] = output_split.areas(body);
+
+    StatefulWidget::render(succ_items, succ_area, buf, &mut state.pos_succ);
+    StatefulWidget::render(err_items, fail_area, buf, &mut state.pos_fail);
+
+    Paragraph::new(Line::from(
+        "q - quit       J/DownArrow - Move Down       K/UpArrow - Move Up       Tab - Switch between success/error",
+    ).bold().centered()).block(Block::bordered()).render(footer, buf);
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -688,6 +880,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         clean: CleanState::new(String::from("")),
         run_state: RunState::default(),
         curr_screen: Screen::Main,
+        result_state: ResultStatus::default(),
     };
     let app_res = app.run(&mut terminal);
     ratatui::restore();
