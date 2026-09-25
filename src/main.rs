@@ -1,9 +1,13 @@
 mod tools;
+use crate::tools::clean_main;
+use tools::CleanReport;
 
-use std::io;
 use std::path::PathBuf;
+use std::sync::mpsc::{self, TryRecvError};
+use std::time::Duration;
+use std::{io, sync::mpsc::Receiver};
 
-use crossterm::event::{KeyCode, KeyEvent, KeyEventKind};
+use crossterm::event::{self, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::{
     DefaultTerminal, Frame,
     layout::{Constraint, Layout},
@@ -13,23 +17,29 @@ use ratatui::{
     widgets::{Block, List, ListItem, ListState, Paragraph, StatefulWidget, Widget},
 };
 
-/*
-useclap::{Parser, error::Result};
-use tools::Options;
-use tools::{populate_paths, run_clean, run_sort}; */
+use ratatui_spinner::LinearSpinner;
 
 // The main struct.Hold info about the state of the entire TUI
 struct App {
     exit: bool,
     menu: MenuState,
     clean: CleanState,
+    run_state: RunState,
     curr_screen: Screen,
 }
-// Current screen selected
-#[derive(Clone, Copy, PartialEq)]
-enum Screen {
-    Main,
-    CleanOptions,
+
+/// This struct saves the state of the current running clean job
+#[derive(Default)]
+struct RunState {
+    rx: Option<Receiver<Message>>,
+    status: Status,
+    log_lines: Vec<String>,
+    real_run: bool,
+    remove_empty: bool,
+    path: PathBuf,
+    scroll: ListState,
+    tick: u64,
+    result: Option<CleanReport>,
 }
 
 // Menu items of the main menu
@@ -38,6 +48,64 @@ const MENU_ITEMS: [&str; 2] = ["Clean", "Sort"];
 struct MenuState {
     list: ListState,
 }
+
+// Holds the data about the clean screen
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct CleanState {
+    real_run: bool,
+    remove_empty: bool,
+    path: String,
+    error: Option<String>,
+    focus: Row,
+}
+
+/// this enum holds the current state of the clean run
+#[derive(Default)]
+enum Status {
+    #[default]
+    Idle,
+    Running,
+    Finished,
+    Failed(String),
+}
+
+/// Current screen selected
+#[derive(Clone, Copy, PartialEq)]
+enum Screen {
+    Main,
+    CleanOptions,
+    RunningClean,
+    CleanResults,
+}
+
+/// Holds data that the sender sends from the cleaning job  
+#[derive(Debug)]
+enum Message {
+    Log(String),
+    Done(Result<CleanReport, String>),
+}
+
+// A very simple struct that holds info about the action of the user
+// Only data is held when the user want to run. The data Will be gotten from the CleanState struct
+#[derive(Debug)]
+enum Action {
+    Run {
+        path: std::path::PathBuf,
+        remove_empty: bool,
+        real_run: bool,
+    },
+    Noop,
+}
+
+// All of the options of Clean options screen
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Row {
+    RealRun,
+    RemoveEmpty,
+    Path,
+    Run,
+}
+
 impl MenuState {
     // Creating a new state and choosing the first option by default
     fn new() -> Self {
@@ -79,15 +147,6 @@ impl MenuState {
     }
 }
 
-// Holds the data about the clean screen
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct CleanState {
-    real_run: bool,
-    remove_empty: bool,
-    path: String,
-    error: Option<String>,
-    focus: Row,
-}
 impl CleanState {
     // a default method. gets a path.
     fn new(path: String) -> Self {
@@ -190,27 +249,6 @@ impl CleanState {
     }
 }
 
-// A very simple struct that holds info about the action of the user
-// Only data is held when the user want to run. The data Will be gotten from the CleanState struct
-#[derive(Debug)]
-enum Action {
-    Run {
-        path: std::path::PathBuf,
-        remove_empty: bool,
-        real_run: bool,
-    },
-    Noop,
-}
-
-// All of the options of Clean options screen
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Row {
-    RealRun,
-    RemoveEmpty,
-    Path,
-    Run,
-}
-
 impl Row {
     // All of the row options such that it would be easier to index into
     const ALL: [Row; 4] = [Row::RealRun, Row::RemoveEmpty, Row::Path, Row::Run];
@@ -247,36 +285,23 @@ impl Row {
     }
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    /*let op = Options::parse();
-    let mut files = populate_paths(&op.path, op.remove_empty_files, op.clean)?;
-    if op.clean {
-        run_clean(files, &op)?;
-    } else {
-        run_sort(&mut files, op.num_sorting);
-    } */
-    let mut terminal = ratatui::init();
-    let mut app = App {
-        exit: false,
-        menu: MenuState::new(),
-        clean: CleanState::new(String::from("")),
-        curr_screen: Screen::Main,
-    };
-    let app_res = app.run(&mut terminal);
-    ratatui::restore();
-    Ok(app_res?)
-}
-
 impl App {
     // Runs the app
     fn run(&mut self, terminal: &mut DefaultTerminal) -> io::Result<()> {
         while !self.exit {
             terminal.draw(|frame| self.draw(frame))?;
-            match crossterm::event::read()? {
-                crossterm::event::Event::Key(key) => self.handle_key(key)?,
-                _ => {}
+
+            // Instead of wating for a keystorke (that might never come while cleaning is running)
+            // we set a timeout of 100 milliseconds and drain after each pass
+            if event::poll(Duration::from_millis(100))? {
+                match crossterm::event::read()? {
+                    crossterm::event::Event::Key(key) => self.handle_key(key)?,
+                    _ => {}
+                }
             }
+            self.drain();
         }
+
         Ok(())
     }
     // draws the screen
@@ -324,7 +349,12 @@ impl App {
 
                     if self.clean.focus == Row::Path {
                         match key.code {
-                            KeyCode::Char(c) if key.modifiers.is_empty() => self.clean.push_char(c),
+                            KeyCode::Char(c) => {
+                                if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT
+                                {
+                                    self.clean.push_char(c)
+                                }
+                            }
                             KeyCode::Backspace => self.clean.backspace(),
                             KeyCode::Enter => self.clean.next(),
                             _ => (),
@@ -346,7 +376,30 @@ impl App {
                                     let action = self.clean.activate();
                                     match action {
                                         Action::Noop => (),
-                                        Action::Run { .. } => (),
+                                        Action::Run {
+                                            path,
+                                            remove_empty,
+                                            real_run,
+                                        } => {
+                                            let (sender, receiver) = mpsc::channel::<Message>();
+                                            self.run_state = RunState {
+                                                rx: Some(receiver),
+                                                status: Status::Running,
+                                                log_lines: Vec::new(),
+                                                real_run,
+                                                remove_empty,
+                                                path: path.clone(),
+                                                scroll: ListState::default(),
+                                                tick: 0,
+                                                result: None,
+                                            };
+
+                                            std::thread::spawn(move || {
+                                                let res = clean_main(&path, remove_empty, real_run);
+                                                let _ = sender.send(Message::Done(res));
+                                            });
+                                            self.curr_screen = Screen::RunningClean;
+                                        }
                                     }
                                 }
                                 _ => (),
@@ -354,11 +407,62 @@ impl App {
                         }
                     }
                 }
+                _ => {
+                    if key.code == KeyCode::Char('q') {
+                        self.exit = true;
+                    }
+                }
             }
         }
         Ok(())
     }
+
+    /// drains the receiver end of the channel.
+    fn drain(&mut self) {
+        // next tick for the animation
+        self.run_state.tick += 1;
+        let mut message = self.run_state.rx.take();
+        if message.is_some() {
+            // trying to read from receiver until it is empty, it might not have something at all,
+            // thats why we are inside the if
+            loop {
+                let res = message.as_ref().unwrap().try_recv();
+                match res {
+                    Ok(m) => match m {
+                        Message::Log(s) => {
+                            self.run_state.log_lines.push(s);
+                        }
+                        Message::Done(Ok(report)) => {
+                            self.run_state.result = Some(report);
+                            self.run_state.status = Status::Finished;
+                            self.curr_screen = Screen::CleanResults;
+                            return;
+                        }
+                        Message::Done(Err(e)) => {
+                            self.run_state.status = Status::Failed(e);
+                            self.curr_screen = Screen::CleanResults;
+                            return;
+                        }
+                    },
+                    Err(TryRecvError::Empty) => {
+                        self.run_state.rx = message.take();
+                        return;
+                    }
+                    Err(mpsc::TryRecvError::Disconnected) => {
+                        self.run_state.status = Status::Failed("Worker crashed".into());
+                        self.run_state.rx = None;
+                        self.curr_screen = Screen::CleanResults;
+                        return;
+                    }
+                }
+            }
+        } else {
+            return;
+        }
+    }
 }
+
+/// We must implement render for this trait
 impl Widget for &mut App {
     fn render(self, area: Rect, buf: &mut Buffer)
     where
@@ -375,10 +479,15 @@ impl Widget for &mut App {
         match self.curr_screen {
             Screen::Main => render_menu(buf, &mut self.menu.list, title, body, footer),
             Screen::CleanOptions => render_clean(buf, &mut self.clean, title, body, footer),
+            Screen::RunningClean => {
+                render_running_clean(buf, &mut self.run_state, title, body, footer)
+            }
+            _ => (),
         }
     }
 }
 
+/// rendering the main screen function
 fn render_menu(buf: &mut Buffer, state: &mut ListState, title: Rect, body: Rect, footer: Rect) {
     let items = MENU_ITEMS
         .into_iter()
@@ -405,6 +514,8 @@ fn render_menu(buf: &mut Buffer, state: &mut ListState, title: Rect, body: Rect,
         .centered()
         .render(inner_footer, buf);
 }
+
+/// rendering the clean options screen
 fn render_clean(buf: &mut Buffer, options: &mut CleanState, title: Rect, body: Rect, footer: Rect) {
     Line::from("Clean Options")
         .bold()
@@ -494,4 +605,91 @@ fn render_clean(buf: &mut Buffer, options: &mut CleanState, title: Rect, body: R
     text.push(second_line);
 
     Paragraph::new(text).render(inner_footer, buf);
+}
+
+// Loading screen when waiting for clean to finish
+fn render_running_clean(
+    buf: &mut Buffer,
+    options: &RunState,
+    title: Rect,
+    body: Rect,
+    footer: Rect,
+) {
+    Line::from("Running Clean")
+        .bold()
+        .centered()
+        .render(title, buf);
+
+    let spinner = LinearSpinner::new(options.tick).total_slots(10);
+
+    let body_split = Layout::vertical([
+        Constraint::Length(2),
+        Constraint::Length(4),
+        Constraint::Min(0),
+    ]);
+    let [loading_area, flags_area, log_area] = body_split.areas(body);
+    let loading_split = Layout::horizontal([
+        Constraint::Length(
+            (&options.path.to_str().unwrap().len() + "Scanning Path:".len() + 5) as u16,
+        ),
+        Constraint::Min(0),
+    ]);
+
+    let [text, spinner_area] = loading_split.areas(loading_area);
+    Line::from(format!("Scanning Path: {:?}", &options.path))
+        .bold()
+        .render(text, buf);
+    spinner.render(spinner_area, buf);
+
+    let mut flags = Vec::new();
+    let real_run = match options.real_run {
+        true => Line::from("WARNING - Deleting files").red(),
+        false => Line::from("Dry run - not deleting files").green(),
+    };
+
+    let remove_empty = match options.remove_empty {
+        true => Line::from("Remove empty files: Yes"),
+        false => Line::from("Remove empty files: No"),
+    };
+
+    flags.append(&mut vec![real_run, remove_empty]);
+    Paragraph::new(flags)
+        .block(Block::bordered().title("Flags"))
+        .render(flags_area, buf);
+
+    // To render the logs, we take the last n lines of the log. We use log_area.height to use the
+    // current height as an indicator of how many lines we can render. we use -2 since the area is
+    // also surrounded by a border
+    let last_items = options
+        .log_lines
+        .iter()
+        .rev()
+        .take((log_area.height - 2) as usize)
+        .rev()
+        .map(|log| ListItem::new(log.as_str()))
+        .collect::<Vec<ListItem>>();
+
+    let log_block = Block::bordered().title("Logs");
+    let inner_log = log_block.inner(log_area);
+    log_block.render(log_area, buf);
+
+    Widget::render(List::new(last_items), inner_log, buf);
+
+    Paragraph::new(Line::from("q - Quit").bold().centered())
+        .block(Block::bordered())
+        .render(footer, buf);
+}
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let mut terminal = ratatui::init();
+    let mut app = App {
+        exit: false,
+        menu: MenuState::new(),
+        clean: CleanState::new(String::from("")),
+        run_state: RunState::default(),
+        curr_screen: Screen::Main,
+    };
+    let app_res = app.run(&mut terminal);
+    ratatui::restore();
+    Ok(app_res?)
 }

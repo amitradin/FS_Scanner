@@ -1,8 +1,8 @@
 use clap::Parser;
 use std::collections::{HashMap, hash_map};
-use std::fs::{self};
+use std::fs;
 use std::fs::{DirEntry, File};
-use std::io::{self, Read, Seek, SeekFrom};
+use std::io::{Read, Seek, SeekFrom};
 use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 use std::path::PathBuf;
@@ -39,44 +39,60 @@ pub struct Options {
     pub num_sorting: usize,
 }
 
+#[derive(Debug)]
+pub struct CleanReport {
+    pub success: Vec<String>,
+    pub errors: Vec<String>,
+}
+
 pub fn clean_main(
     path: &PathBuf,
     remove_empty: bool,
     real_run: bool,
-) -> Result<Vec<String>, Box<dyn std::error::Error>> {
-    let files = populate_paths(path, remove_empty, true)?;
-    let res = run_clean(files, remove_empty, real_run)?;
-    Ok(res)
+) -> Result<CleanReport, String> {
+    let mut fail = Vec::new();
+    let (files, mut err) = populate_paths(path, remove_empty, true)?;
+    fail.append(&mut err);
+    let (succ, mut err) = run_clean(files, remove_empty, real_run)?;
+    fail.append(&mut err);
+    Ok(CleanReport {
+        success: succ,
+        errors: fail,
+    })
 }
 
-fn sort_main(
-    path: &PathBuf,
-    num_sorting: usize,
-) -> Result<Vec<String>, Box<dyn std::error::Error>> {
-    let mut files = populate_paths(path, false, false)?;
-    let res = run_sort(&mut files, num_sorting);
-    Ok(res)
+fn sort_main(path: &PathBuf, num_sorting: usize) -> Result<CleanReport, String> {
+    let (mut files, mut failed) = populate_paths(path, false, false)?;
+    let mut fail = Vec::new();
+    fail.append(&mut failed);
+    let succ = run_sort(&mut files, num_sorting);
+    Ok(CleanReport {
+        success: succ,
+        errors: fail,
+    })
 }
 pub fn run_clean(
     files: Vec<(u64, PathBuf)>,
     remove_empty: bool,
     real_run: bool,
-) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+) -> Result<(Vec<String>, Vec<String>), String> {
     let files = group_into_similar(files);
-    let mut res = Vec::new();
+    let mut succ = Vec::new();
+    let mut err = Vec::new();
     for item in files {
-        let mut res_len = scan_and_clean(item.1, item.0 as usize, remove_empty, real_run)?;
-        res.append(&mut res_len);
+        let (mut success, mut fail) =
+            scan_and_clean(item.1, item.0 as usize, remove_empty, real_run)?;
+        succ.append(&mut success);
+        err.append(&mut fail)
     }
-    Ok(res)
+    Ok((succ, err))
 }
-pub fn run_sort(files: &mut Vec<(u64, PathBuf)>, num_sorting: usize) -> Vec<(String)> {
+pub fn run_sort(files: &mut Vec<(u64, PathBuf)>, num_sorting: usize) -> Vec<String> {
     let mut res = Vec::new();
     files.sort_by(|a, b| b.0.cmp(&a.0));
     let len = num_sorting.min(files.len());
     for i in 0..len {
         let curr = files.get(i).unwrap();
-        println!("{:.2}MB : {:?}", (curr.0 as f64 / 1_000_000.0), curr.1);
         res.push(format!(
             "{:.2}MB : {:?}",
             (curr.0 as f64 / 1_000_000.0),
@@ -91,7 +107,7 @@ pub fn populate_paths(
     path: &Path,
     remove_empty: bool,
     is_clean: bool,
-) -> Result<Vec<(u64, PathBuf)>, std::io::Error> {
+) -> Result<(Vec<(u64, PathBuf)>, Vec<String>), String> {
     const BUNDLE_EXTS: &[&str] = &[
         "app",
         "framework",
@@ -103,12 +119,13 @@ pub fn populate_paths(
         "prefPane",
         "qlgenerator",
     ];
+    let mut err = Vec::new();
     let mut dir_paths: Vec<PathBuf> = vec![path.to_path_buf()];
     let mut file_paths: Vec<(u64, PathBuf)> = Vec::new();
     while let Some(curr_dir) = dir_paths.pop() {
         let tester = fs::read_dir(&curr_dir);
         if let Err(e) = tester {
-            eprintln!("Could not read {curr_dir:?}, moving to the next, Error was: {e:?}");
+            err.push(format!("Could not read {:?}, got an error {e}", &curr_dir));
             continue;
         }
         let curr_dir: Vec<DirEntry> = tester
@@ -135,10 +152,10 @@ pub fn populate_paths(
 
             let metadata = entry.metadata();
             if let Err(e) = metadata {
-                eprintln!(
-                    "Could not access the metadata of {:?}, got an error of {e}",
+                err.push(format!(
+                    "Could not access the metadata of {:?}, got an error {e}",
                     entry.path()
-                );
+                ));
                 continue;
             }
             let metadata = metadata.unwrap();
@@ -161,16 +178,13 @@ pub fn populate_paths(
                         .is_some_and(|e| BUNDLE_EXTS.iter().any(|b| b.eq_ignore_ascii_case(e)));
                 }
                 if is_bundle {
-                    eprintln!(
-                        "Skipping bundle {path:?} (deleting it might break the corresponding app)"
-                    );
                     continue;
                 }
                 dir_paths.push(entry.path());
             }
         }
     }
-    Ok(file_paths)
+    Ok((file_paths, err))
 }
 
 fn group_into_similar(files: Vec<(u64, PathBuf)>) -> HashMap<u64, Vec<PathBuf>> {
@@ -213,13 +227,18 @@ fn scan_and_clean(
     len: usize,
     remove_empty: bool,
     real_run: bool,
-) -> Result<Vec<String>, Box<dyn std::error::Error>> {
-    // A cache of first 4096 bytes of the file. This can help on small files. This can reduce that
+) -> Result<(Vec<String>, Vec<String>), String> {
+    // A cache of first 4096 bytes of the file. This can help on small files. This can reduce the
     // total reads from O(n^2) to O(n)
-    let mut res: Vec<String> = Vec::new();
+    let mut succ: Vec<String> = Vec::new();
+    let mut fail: Vec<String> = Vec::new();
     let mut index_to_first_hash: HashMap<usize, [u8; 4096]> = HashMap::new();
     let prefix = len.min(4096) as usize;
-    read_first_4096_bytes(&files, &mut index_to_first_hash, prefix)?;
+    fail.append(&mut read_first_4096_bytes(
+        &files,
+        &mut index_to_first_hash,
+        prefix,
+    ));
     if len == 0 && remove_empty {
         return Ok(delete_empty(files, real_run)?);
     }
@@ -252,38 +271,33 @@ fn scan_and_clean(
             if len > 4096 {
                 let file1 = File::open(curr_file);
                 if let Err(e) = file1 {
-                    println!("Could not open {:?}, got an error {e}", curr_file);
+                    fail.push(format!("Could not open {:?}, got an error: {e}", curr_file));
                     continue;
                 }
                 let mut file1 = file1.unwrap();
                 let seek = file1.seek(SeekFrom::Start(4096));
                 if let Err(e) = seek {
-                    println!(
-                        "Could not seek the first 4096 of {:?}, got an error {e}",
-                        curr_file
-                    );
+                    fail.push(format!("Could not seek {:?}, got an error: {e}", curr_file));
                     continue;
                 }
                 let file2 = File::open(compare);
+
                 if let Err(e) = file2 {
-                    println!("Could not open {:?}, got an error {e}", curr_file);
+                    fail.push(format!("Could not open {:?}, got an error: {e}", compare));
                     continue;
                 }
                 let mut file2 = file2.unwrap();
-                let seek = file1.seek(SeekFrom::Start(4096));
+                let seek = file2.seek(SeekFrom::Start(4096));
                 if let Err(e) = seek {
-                    println!(
-                        "Could not seek the first 4096 of {:?}, got an error {e}",
-                        compare
-                    );
+                    fail.push(format!("Could not seek {:?}, got an error: {e}", compare));
                     continue;
                 }
                 let comp2 = compare_2_files(&mut file1, &mut file2, (len - 4096) as usize);
                 if let Err(e) = comp2 {
-                    eprintln!(
-                        "Could not compare \n{:?} and \n{:?}, got an error of {e}\n",
+                    fail.push(format!(
+                        "Could not compare {:?}, {:?}, got an error {e}",
                         curr_file, compare
-                    );
+                    ));
                     continue;
                 }
                 comp = comp2.unwrap();
@@ -291,24 +305,19 @@ fn scan_and_clean(
 
             if comp {
                 if real_run {
-                    println!(
-                        "Removing file \n{:?} \nit is equal to \n{:?}\n",
-                        compare, curr_file
-                    );
-                    res.push(format!(
-                        "Removing file \n{:?} \nit is equal to \n{:?}\n",
-                        compare, curr_file
-                    ));
                     if let Err(e) = fs::remove_file(compare) {
-                        eprintln!("Could not delete {:?}, got an Error {e}", compare);
+                        fail.push(format!(
+                            "Could not remove file {compare:?}, got an error: {e}"
+                        ));
                         continue;
+                    } else {
+                        succ.push(format!(
+                            "Removing file \n{:?} \nit is equal to \n{:?}\n",
+                            compare, curr_file
+                        ));
                     }
                 } else {
-                    println!(
-                        "This is a dry run, would remove file \n{:?} \nit is equal to \n{:?}\n",
-                        compare, curr_file
-                    );
-                    res.push(format!(
+                    succ.push(format!(
                         "This is a dry run, Would remove file \n{:?} \nit is equal to \n{:?}\n",
                         compare, curr_file
                     ));
@@ -317,62 +326,76 @@ fn scan_and_clean(
             }
         }
     }
-    Ok(res)
+    Ok((succ, fail))
 }
 
 fn read_first_4096_bytes(
     files: &Vec<PathBuf>,
     mapping: &mut HashMap<usize, [u8; 4096]>,
     len: usize,
-) -> Result<(), io::Error> {
+) -> Vec<String> {
+    let mut fail = Vec::new();
     for i in 0..files.len() {
         let mut buf = [0u8; 4096];
         let curr = File::open(&files[i]);
         if let Err(e) = curr.as_ref() {
-            println!("Could not open {:?}, got an error {e}", &files[i]);
+            fail.push(format!("Could not open {:?}, got an error: {e}", &files[i]));
             continue;
         }
         let mut curr = curr.unwrap();
+
         let read = curr.read_exact(&mut buf[0..len]);
         if let Err(e) = read {
-            println!("Could not read {:?}, got an error {e}", &files[i]);
+            fail.push(format!("Could not read {:?}, got an error: {e}", &files[i]));
             continue;
         }
         mapping.insert(i, buf);
     }
-    Ok(())
+    fail
 }
-fn delete_empty(empty_files: Vec<PathBuf>, real_run: bool) -> Result<Vec<String>, io::Error> {
-    let mut res: Vec<String> = Vec::new();
+fn delete_empty(
+    empty_files: Vec<PathBuf>,
+    real_run: bool,
+) -> Result<(Vec<String>, Vec<String>), String> {
+    let mut succ: Vec<String> = Vec::new();
+    let mut fail: Vec<String> = Vec::new();
+
     for path in empty_files {
         let file = File::open(&path);
         if let Err(e) = file.as_ref() {
-            println!("Could not open {:?}, got an erorr {e}", &path);
+            fail.push(format!("Could not open {:?}, got an error: {e}", &path));
+            continue;
         }
         let file = file.unwrap();
 
         let metadata = file.metadata();
         if let Err(e) = metadata {
-            eprintln!(
-                "Could not get the metadata of {:?}, got an error {e}",
+            fail.push(format!(
+                "Could not access the metadata of {:?}, got an error: {e}",
                 &path
-            );
+            ));
             continue;
         }
         let metadata = metadata.unwrap();
         if metadata.len() == 0 {
             if real_run {
                 if let Err(e) = fs::remove_file(&path) {
-                    eprintln!("Could not remove {:?}, got an error {e}", &path);
+                    fail.push(format!(
+                        "Could not remove file {:?}, got an error: {e}",
+                        &path
+                    ));
+
                     continue;
                 } else {
-                    println!("Removed empty file: {:?}", path);
+                    succ.push(format!("Removed {:?} : sized 0", path));
                 }
             } else {
-                println!("This is a dry run, would remove file {:?}", &path)
+                succ.push(format!(
+                    "This is a dry run, would remove {:?} : sized 0",
+                    path
+                ));
             }
-            res.push(format!("{:?} : sized 0", path));
         }
     }
-    Ok(res)
+    Ok((succ, fail))
 }
