@@ -1,4 +1,3 @@
-use clap::Parser;
 use std::collections::{HashMap, hash_map};
 use std::fs;
 use std::fs::{DirEntry, File};
@@ -7,37 +6,8 @@ use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 use std::path::PathBuf;
 
-#[derive(Debug, Parser)]
-#[clap(group(
-    clap::ArgGroup::new("features").required(true)
-))]
-pub struct Options {
-    /// This flag activates the cleaning feature. Nothing gets deleted if real_run is not set
-    #[arg(short, long, default_value_t = false, group = "features")]
-    pub clean: bool,
-    /// This is the only required flag.
-    #[arg(short, long, required = true)]
-    pub path: PathBuf,
-    /// If this flag is set, then all of the duplicates would get deleted
-    #[arg(short, long, default_value_t = false, requires = "clean")]
-    pub real_run: bool,
-    /// Makes clean remove all empty files as well
-    #[arg(short = 'e', long, default_value_t = false, requires = "clean")]
-    pub remove_empty_files: bool,
-    /// This is a feature which is unrelated to clean. this sorts the files by size.
-    #[arg(
-        short,
-        long,
-        default_value_t = false,
-        conflicts_with = "clean",
-        group = "features"
-    )]
-    pub sort: bool,
-    /// This can specify how many files to show in the sort.
-    /// Gets the minimum of specified and the actual number of files
-    #[arg(short, long, default_value_t = 20, requires = "sort")]
-    pub num_sorting: usize,
-}
+use crate::Message;
+use std::sync::mpsc::Sender;
 
 #[derive(Debug)]
 pub struct CleanReport {
@@ -49,11 +19,13 @@ pub fn clean_main(
     path: &PathBuf,
     remove_empty: bool,
     real_run: bool,
+    sender: Sender<Message>,
 ) -> Result<CleanReport, String> {
     let mut fail = Vec::new();
-    let (files, mut err) = populate_paths(path, remove_empty, true)?;
+    let _ = sender.send(Message::Log(String::from("Starting to populate paths")));
+    let (files, mut err) = populate_paths(path, remove_empty, true, sender.clone())?;
     fail.append(&mut err);
-    let (succ, mut err) = run_clean(files, remove_empty, real_run)?;
+    let (succ, mut err) = run_clean(files, remove_empty, real_run, sender.clone())?;
     fail.append(&mut err);
     Ok(CleanReport {
         success: succ,
@@ -61,10 +33,18 @@ pub fn clean_main(
     })
 }
 
-fn sort_main(path: &PathBuf, num_sorting: usize) -> Result<CleanReport, String> {
-    let (mut files, mut failed) = populate_paths(path, false, false)?;
+fn sort_main(
+    path: &PathBuf,
+    num_sorting: usize,
+    sender: Sender<Message>,
+) -> Result<CleanReport, String> {
+    let (mut files, mut failed) = populate_paths(path, false, false, sender.clone())?;
     let mut fail = Vec::new();
     fail.append(&mut failed);
+    let _ = sender.send(Message::Log(format!(
+        "Starting to sort the files, total files in comparing: {}",
+        files.len()
+    )));
     let succ = run_sort(&mut files, num_sorting);
     Ok(CleanReport {
         success: succ,
@@ -75,13 +55,19 @@ pub fn run_clean(
     files: Vec<(u64, PathBuf)>,
     remove_empty: bool,
     real_run: bool,
+    sender: Sender<Message>,
 ) -> Result<(Vec<String>, Vec<String>), String> {
-    let files = group_into_similar(files);
+    let files = group_into_similar(files, sender.clone());
     let mut succ = Vec::new();
     let mut err = Vec::new();
     for item in files {
-        let (mut success, mut fail) =
-            scan_and_clean(item.1, item.0 as usize, remove_empty, real_run)?;
+        let (mut success, mut fail) = scan_and_clean(
+            item.1,
+            item.0 as usize,
+            remove_empty,
+            real_run,
+            sender.clone(),
+        )?;
         succ.append(&mut success);
         err.append(&mut fail)
     }
@@ -107,6 +93,7 @@ pub fn populate_paths(
     path: &Path,
     remove_empty: bool,
     is_clean: bool,
+    sender: Sender<Message>,
 ) -> Result<(Vec<(u64, PathBuf)>, Vec<String>), String> {
     const BUNDLE_EXTS: &[&str] = &[
         "app",
@@ -123,6 +110,7 @@ pub fn populate_paths(
     let mut dir_paths: Vec<PathBuf> = vec![path.to_path_buf()];
     let mut file_paths: Vec<(u64, PathBuf)> = Vec::new();
     while let Some(curr_dir) = dir_paths.pop() {
+        let _ = sender.send(Message::Log(format!("Starting to scan {:?}", &curr_dir,)));
         let tester = fs::read_dir(&curr_dir);
         if let Err(e) = tester {
             err.push(format!("Could not read {:?}, got an error {e}", &curr_dir));
@@ -187,7 +175,13 @@ pub fn populate_paths(
     Ok((file_paths, err))
 }
 
-fn group_into_similar(files: Vec<(u64, PathBuf)>) -> HashMap<u64, Vec<PathBuf>> {
+fn group_into_similar(
+    files: Vec<(u64, PathBuf)>,
+    sender: Sender<Message>,
+) -> HashMap<u64, Vec<PathBuf>> {
+    let _ = sender.send(Message::Log(String::from(
+        "Starting to group files into similar sizes",
+    )));
     let mut mapping: HashMap<u64, Vec<PathBuf>> = HashMap::new();
     for item in files {
         if let hash_map::Entry::Vacant(e) = mapping.entry(item.0) {
@@ -196,6 +190,13 @@ fn group_into_similar(files: Vec<(u64, PathBuf)>) -> HashMap<u64, Vec<PathBuf>> 
             mapping.get_mut(&item.0).unwrap().push(item.1)
         }
     }
+    for (key, val) in &mapping {
+        let _ = sender.send(Message::Log(format!(
+            "Group sized {key} had {} elements",
+            val.len()
+        )));
+    }
+
     mapping
 }
 /* since we don't want to compare the entire files at once (can be very wastful) we should instead
@@ -227,6 +228,7 @@ fn scan_and_clean(
     len: usize,
     remove_empty: bool,
     real_run: bool,
+    sender: Sender<Message>,
 ) -> Result<(Vec<String>, Vec<String>), String> {
     // A cache of first 4096 bytes of the file. This can help on small files. This can reduce the
     // total reads from O(n^2) to O(n)
@@ -238,9 +240,11 @@ fn scan_and_clean(
         &files,
         &mut index_to_first_hash,
         prefix,
+        sender.clone(),
     ));
     if len == 0 && remove_empty {
-        return Ok(delete_empty(files, real_run)?);
+        let _ = sender.send(Message::Log(String::from("Starting to scan empty files")));
+        return Ok(delete_empty(files, real_run, sender.clone())?);
     }
     let mut gone_over = vec![false; files.len()];
     for i in 0..files.len() {
@@ -292,6 +296,10 @@ fn scan_and_clean(
                     fail.push(format!("Could not seek {:?}, got an error: {e}", compare));
                     continue;
                 }
+                let _ = sender.send(Message::Log(format!(
+                    "Comparing {:?} and {:?}",
+                    curr_file, compare
+                )));
                 let comp2 = compare_2_files(&mut file1, &mut file2, (len - 4096) as usize);
                 if let Err(e) = comp2 {
                     fail.push(format!(
@@ -333,6 +341,7 @@ fn read_first_4096_bytes(
     files: &Vec<PathBuf>,
     mapping: &mut HashMap<usize, [u8; 4096]>,
     len: usize,
+    sender: Sender<Message>,
 ) -> Vec<String> {
     let mut fail = Vec::new();
     for i in 0..files.len() {
@@ -349,6 +358,10 @@ fn read_first_4096_bytes(
             fail.push(format!("Could not read {:?}, got an error: {e}", &files[i]));
             continue;
         }
+        let _ = sender.send(Message::Log(format!(
+            "Cacheing first 4096 bytes of {:?}",
+            &files[i]
+        )));
         mapping.insert(i, buf);
     }
     fail
@@ -356,11 +369,16 @@ fn read_first_4096_bytes(
 fn delete_empty(
     empty_files: Vec<PathBuf>,
     real_run: bool,
+    sender: Sender<Message>,
 ) -> Result<(Vec<String>, Vec<String>), String> {
     let mut succ: Vec<String> = Vec::new();
     let mut fail: Vec<String> = Vec::new();
 
     for path in empty_files {
+        let _ = sender.send(Message::Log(format!(
+            "Checking to see if {:?} is actually empty before deleting",
+            &path
+        )));
         let file = File::open(&path);
         if let Err(e) = file.as_ref() {
             fail.push(format!("Could not open {:?}, got an error: {e}", &path));

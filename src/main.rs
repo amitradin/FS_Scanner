@@ -400,7 +400,12 @@ impl App {
                                             };
 
                                             std::thread::spawn(move || {
-                                                let res = clean_main(&path, remove_empty, real_run);
+                                                let res = clean_main(
+                                                    &path,
+                                                    remove_empty,
+                                                    real_run,
+                                                    sender.clone(),
+                                                );
                                                 let _ = sender.send(Message::Done(res));
                                             });
                                             self.curr_screen = Screen::RunningClean;
@@ -524,9 +529,14 @@ impl Widget for &mut App {
             Screen::RunningClean => {
                 render_running_clean(buf, &mut self.run_state, title, body, footer)
             }
-            Screen::CleanResults => {
-                render_results_screen(buf, &mut self.result_state, title, body, footer)
-            }
+            Screen::CleanResults => render_results_screen(
+                buf,
+                &mut self.result_state,
+                &self.run_state.status,
+                title,
+                body,
+                footer,
+            ),
         }
     }
 }
@@ -809,7 +819,8 @@ fn render_running_clean(
 
 fn render_results_screen(
     buf: &mut Buffer,
-    state: &mut ResultStatus,
+    results: &mut ResultStatus,
+    state: &Status,
     title: Rect,
     body: Rect,
     footer: Rect,
@@ -819,11 +830,25 @@ fn render_results_screen(
         .centered()
         .render(title, buf);
 
-    if state.output.is_none() {
+    if results.output.is_none() {
         return;
     }
+    match state {
+        Status::Failed(s) => {
+            Paragraph::new(
+                Line::from(format!("Got an error in the run: {s}"))
+                    .bold()
+                    .centered()
+                    .red(),
+            )
+            .block(Block::bordered())
+            .render(body, buf);
+            return;
+        }
+        _ => (),
+    }
 
-    let report = state.output.as_ref().unwrap();
+    let report = results.output.as_ref().unwrap();
 
     let succ_items = report
         .success
@@ -847,7 +872,7 @@ fn render_results_screen(
         .highlight_style(Style::new().reversed())
         .highlight_symbol(">>");
 
-    if state.fail_focus {
+    if results.fail_focus {
         err_items = err_items.block(
             Block::bordered()
                 .title("Error Output")
@@ -864,8 +889,8 @@ fn render_results_screen(
     let output_split = Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)]);
     let [succ_area, fail_area] = output_split.areas(body);
 
-    StatefulWidget::render(succ_items, succ_area, buf, &mut state.pos_succ);
-    StatefulWidget::render(err_items, fail_area, buf, &mut state.pos_fail);
+    StatefulWidget::render(succ_items, succ_area, buf, &mut results.pos_succ);
+    StatefulWidget::render(err_items, fail_area, buf, &mut results.pos_fail);
 
     Paragraph::new(Line::from(
         "q - quit       J/DownArrow - Move Down       K/UpArrow - Move Up       Tab - Switch between success/error",
