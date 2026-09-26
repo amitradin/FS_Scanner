@@ -15,6 +15,8 @@ pub struct CleanReport {
     pub errors: Vec<String>,
 }
 
+type ComplexReturn = Result<(Vec<(u64, PathBuf)>, Vec<String>), String>;
+
 pub fn clean_main(
     path: &Path,
     remove_empty: bool,
@@ -94,7 +96,7 @@ pub fn populate_paths(
     remove_empty: bool,
     is_clean: bool,
     sender: Sender<Message>,
-) -> Result<(Vec<(u64, PathBuf)>, Vec<String>), String> {
+) -> ComplexReturn {
     const BUNDLE_EXTS: &[&str] = &[
         "app",
         "framework",
@@ -338,24 +340,24 @@ fn scan_and_clean(
 }
 
 fn read_first_4096_bytes(
-    files: &Vec<PathBuf>,
+    files: &[PathBuf],
     mapping: &mut HashMap<usize, [u8; 4096]>,
     len: usize,
     sender: Sender<Message>,
 ) -> Vec<String> {
     let mut fail = Vec::new();
-    for i in 0..files.len() {
+    for (i, file) in files.iter().enumerate() {
         let mut buf = [0u8; 4096];
         let curr = File::open(&files[i]);
         if let Err(e) = curr.as_ref() {
-            fail.push(format!("Could not open {:?}, got an error: {e}", files[i]));
+            fail.push(format!("Could not open {:?}, got an error: {e}", file));
             continue;
         }
         let mut curr = curr.unwrap();
 
         let read = curr.read_exact(&mut buf[0..len]);
         if let Err(e) = read {
-            fail.push(format!("Could not read {:?}, got an error: {e}", files[i]));
+            fail.push(format!("Could not read {:?}, got an error: {e}", file));
             continue;
         }
         let _ = sender.send(Message::Log(format!(

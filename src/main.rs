@@ -365,11 +365,7 @@ impl Row {
         }
     }
     fn is_toggle(self) -> bool {
-        match self {
-            Row::RealRun => true,
-            Row::RemoveEmpty => true,
-            _ => false,
-        }
+        matches!(self, Row::RealRun | Row::RemoveEmpty)
     }
     // maps row to hint (when hovering)
     fn hint(self) -> &'static str {
@@ -393,10 +389,10 @@ impl App {
 
             // Instead of wating for a keystorke (that might never come while cleaning is running)
             // we set a timeout of 100 milliseconds and drain after each pass
-            if event::poll(Duration::from_millis(100))? {
-                if let crossterm::event::Event::Key(key) = crossterm::event::read()? {
-                    self.handle_key(key)?
-                }
+            if event::poll(Duration::from_millis(100))?
+                && let crossterm::event::Event::Key(key) = crossterm::event::read()?
+            {
+                self.handle_key(key)?
             }
             self.drain();
         }
@@ -517,38 +513,36 @@ impl App {
                             if self.clean.focus.is_toggle() {
                                 self.clean.activate();
                             }
-                        } else if key.code == KeyCode::Enter {
-                            if self.clean.focus == Row::Run {
-                                let action = self.clean.activate();
-                                match action {
-                                    Action::Noop => (),
-                                    Action::Run {
-                                        path,
-                                        remove_empty,
+                        } else if key.code == KeyCode::Enter && self.clean.focus == Row::Run {
+                            let action = self.clean.activate();
+                            match action {
+                                Action::Noop => (),
+                                Action::Run {
+                                    path,
+                                    remove_empty,
+                                    real_run,
+                                } => {
+                                    let (sender, receiver) = mpsc::channel::<Message>();
+                                    self.run_state = RunState {
+                                        rx: Some(receiver),
+                                        status: Status::Running,
+                                        log_lines: Vec::new(),
                                         real_run,
-                                    } => {
-                                        let (sender, receiver) = mpsc::channel::<Message>();
-                                        self.run_state = RunState {
-                                            rx: Some(receiver),
-                                            status: Status::Running,
-                                            log_lines: Vec::new(),
-                                            real_run,
-                                            remove_empty,
-                                            path: path.clone(),
-                                            tick: 0,
-                                        };
+                                        remove_empty,
+                                        path: path.clone(),
+                                        tick: 0,
+                                    };
 
-                                        std::thread::spawn(move || {
-                                            let res = clean_main(
-                                                &path,
-                                                remove_empty,
-                                                real_run,
-                                                sender.clone(),
-                                            );
-                                            let _ = sender.send(Message::Done(res));
-                                        });
-                                        self.curr_screen = Screen::RunningClean;
-                                    }
+                                    std::thread::spawn(move || {
+                                        let res = clean_main(
+                                            &path,
+                                            remove_empty,
+                                            real_run,
+                                            sender.clone(),
+                                        );
+                                        let _ = sender.send(Message::Done(res));
+                                    });
+                                    self.curr_screen = Screen::RunningClean;
                                 }
                             }
                         }
@@ -645,8 +639,6 @@ impl App {
                     }
                 }
             }
-        } else {
-            return;
         }
     }
 }
