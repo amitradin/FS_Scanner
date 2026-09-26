@@ -1061,23 +1061,47 @@ fn render_sort_options(
         Constraint::Min(0),
     ]);
     let [path_area, num_area, _] = body_split.areas(body);
-    let mut path_par =
-        Paragraph::new(Line::from(options.path.as_str().bold())).block(Block::bordered());
+    let mut path_par = Paragraph::new(Line::from(options.path.as_str().bold()))
+        .block(Block::bordered().title("Path"));
 
     if options.focus.selected() == Some(0) {
         match options.is_valid_path() {
-            true => path_par = path_par.block(Block::bordered().border_style(Style::new().green())),
-            false => path_par = path_par.block(Block::bordered().border_style(Style::new().red())),
+            true => {
+                path_par = path_par.block(
+                    Block::bordered()
+                        .title("Path")
+                        .border_style(Style::new().green()),
+                )
+            }
+            false => {
+                path_par = path_par.block(
+                    Block::bordered()
+                        .title("Path")
+                        .border_style(Style::new().red()),
+                )
+            }
         }
     }
     path_par.render(path_area, buf);
 
-    let mut num_par =
-        Paragraph::new(Line::from(options.num_show.as_str().bold())).block(Block::bordered());
+    let mut num_par = Paragraph::new(Line::from(options.num_show.as_str().bold()))
+        .block(Block::bordered().title("Number of Files to show"));
     if options.focus.selected() == Some(1) {
         match options.num_show.as_str().parse::<usize>() {
-            Ok(_) => num_par = num_par.block(Block::bordered().border_style(Style::new().green())),
-            Err(_) => num_par = num_par.block(Block::bordered().border_style(Style::new().red())),
+            Ok(_) => {
+                num_par = num_par.block(
+                    Block::bordered()
+                        .title("Number of Files to show")
+                        .border_style(Style::new().green()),
+                )
+            }
+            Err(_) => {
+                num_par = num_par.block(
+                    Block::bordered()
+                        .title("Number of Files to show")
+                        .border_style(Style::new().red()),
+                )
+            }
         }
     }
     num_par.render(num_area, buf);
