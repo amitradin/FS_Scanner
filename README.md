@@ -1,4 +1,4 @@
-# duplicate_file_finder
+# File System Scanner
 
 A small Rust terminal UI (built with [ratatui](https://ratatui.rs)) that walks a directory tree and either lists the largest files or finds and deletes byte-identical duplicates.
 
@@ -21,7 +21,7 @@ Finds duplicate files under a directory and removes (or reports) the extra copie
 
 1. Pick **Clean** from the main menu.
 2. Set the options:
-   - **Real run** — actually delete files. Off by default, which makes the run a dry run that only reports what *would* be removed.
+   - **Real run** — actually delete files. Off by default, which makes the run a dry run that only reports what _would_ be removed.
    - **Remove empty files** — also consider (and delete) zero-byte files.
    - **Path** — the root directory to scan. Type it directly into the box; the border turns green when it's a valid directory and red when it isn't.
 3. Move to **Run** and press Enter.
@@ -45,13 +45,13 @@ The list appears in the results screen's Success Output pane.
 
 ### Keys
 
-| Screen | Keys |
-| --- | --- |
-| Main menu | `j`/`k`, `↑`/`↓`, or `Tab`/`Shift+Tab` to move · `Enter` to select · `q` to quit |
+| Screen        | Keys                                                                                                                                                                                                               |
+| ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Main menu     | `j`/`k`, `↑`/`↓`, or `Tab`/`Shift+Tab` to move · `Enter` to select · `q` to quit                                                                                                                                   |
 | Clean options | `Tab`/`↓` and `Shift+Tab`/`↑` to move between controls (`j`/`k` also work outside the path box) · `Space` toggles a checkbox · type to edit the path · `Enter` on **Run** starts the scan · `Esc` back to the menu |
-| Sort options | `Tab`/`Shift+Tab` or `↑`/`↓` to switch fields · type to edit · `Enter` to run · `Esc` back to the menu |
-| Running | `q` to quit |
-| Results | `j`/`k` or `↑`/`↓` to scroll · `PgUp`/`PgDn` to jump · `Tab` to switch between Success and Error panes · `q` to quit |
+| Sort options  | `Tab`/`Shift+Tab` or `↑`/`↓` to switch fields · type to edit · `Enter` to run · `Esc` back to the menu                                                                                                             |
+| Running       | `q` to quit                                                                                                                                                                                                        |
+| Results       | `j`/`k` or `↑`/`↓` to scroll · `PgUp`/`PgDn` to jump · `Tab` to switch between Success and Error panes · `q` to quit                                                                                               |
 
 Quitting while a scan is running stops it immediately. During a real run, that means deletion stops partway through.
 
