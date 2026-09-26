@@ -208,9 +208,8 @@ impl SortOptions {
     }
 
     fn change(&mut self) {
-        match self.focus.selected() {
-            Some(i) => self.focus.select(Some(1 - i)),
-            None => (),
+        if let Some(i) = self.focus.selected() {
+            self.focus.select(Some(1 - i))
         }
     }
 
@@ -234,7 +233,7 @@ impl SortOptions {
             return false;
         }
         let path = PathBuf::from(trimmed);
-        if path.is_dir() { true } else { false }
+        path.is_dir()
     }
 }
 
@@ -395,9 +394,8 @@ impl App {
             // Instead of wating for a keystorke (that might never come while cleaning is running)
             // we set a timeout of 100 milliseconds and drain after each pass
             if event::poll(Duration::from_millis(100))? {
-                match crossterm::event::read()? {
-                    crossterm::event::Event::Key(key) => self.handle_key(key)?,
-                    _ => {}
+                if let crossterm::event::Event::Key(key) = crossterm::event::read()? {
+                    self.handle_key(key)?
                 }
             }
             self.drain();
@@ -520,41 +518,38 @@ impl App {
                                 self.clean.activate();
                             }
                         } else if key.code == KeyCode::Enter {
-                            match self.clean.focus {
-                                Row::Run => {
-                                    let action = self.clean.activate();
-                                    match action {
-                                        Action::Noop => (),
-                                        Action::Run {
-                                            path,
-                                            remove_empty,
+                            if self.clean.focus == Row::Run {
+                                let action = self.clean.activate();
+                                match action {
+                                    Action::Noop => (),
+                                    Action::Run {
+                                        path,
+                                        remove_empty,
+                                        real_run,
+                                    } => {
+                                        let (sender, receiver) = mpsc::channel::<Message>();
+                                        self.run_state = RunState {
+                                            rx: Some(receiver),
+                                            status: Status::Running,
+                                            log_lines: Vec::new(),
                                             real_run,
-                                        } => {
-                                            let (sender, receiver) = mpsc::channel::<Message>();
-                                            self.run_state = RunState {
-                                                rx: Some(receiver),
-                                                status: Status::Running,
-                                                log_lines: Vec::new(),
-                                                real_run,
-                                                remove_empty,
-                                                path: path.clone(),
-                                                tick: 0,
-                                            };
+                                            remove_empty,
+                                            path: path.clone(),
+                                            tick: 0,
+                                        };
 
-                                            std::thread::spawn(move || {
-                                                let res = clean_main(
-                                                    &path,
-                                                    remove_empty,
-                                                    real_run,
-                                                    sender.clone(),
-                                                );
-                                                let _ = sender.send(Message::Done(res));
-                                            });
-                                            self.curr_screen = Screen::RunningClean;
-                                        }
+                                        std::thread::spawn(move || {
+                                            let res = clean_main(
+                                                &path,
+                                                remove_empty,
+                                                real_run,
+                                                sender.clone(),
+                                            );
+                                            let _ = sender.send(Message::Done(res));
+                                        });
+                                        self.curr_screen = Screen::RunningClean;
                                     }
                                 }
-                                _ => (),
                             }
                         }
                     }
@@ -610,13 +605,13 @@ impl App {
                             self.run_state.log_lines.push(s);
                         }
                         Message::Done(Ok(report)) => {
-                            if report.success.len() > 0 {
+                            if !report.success.is_empty() {
                                 self.result_state.pos_succ.select(Some(0));
                             } else {
                                 self.result_state.pos_succ.select(None);
                             }
 
-                            if report.errors.len() > 0 {
+                            if !report.errors.is_empty() {
                                 self.result_state.pos_fail.select(Some(0));
                             } else {
                                 self.result_state.pos_fail.select(None);
@@ -677,7 +672,7 @@ impl Widget for &mut App {
                 "Running Clean",
                 Screen::RunningClean,
                 buf,
-                &mut self.run_state,
+                &self.run_state,
                 title,
                 body,
                 footer,
@@ -687,7 +682,7 @@ impl Widget for &mut App {
                 "Running Sort",
                 Screen::RunnignSort,
                 buf,
-                &mut self.run_state,
+                &self.run_state,
                 title,
                 body,
                 footer,
@@ -711,7 +706,7 @@ impl ResultStatus {
             return;
         }
         match self.fail_focus {
-            false if self.output.as_ref().unwrap().success.len() > 0 => {
+            false if !self.output.as_ref().unwrap().success.is_empty() => {
                 let curr = self.pos_succ.selected().unwrap_or(0);
                 if curr >= self.output.as_ref().unwrap().success.len() - 1 {
                     self.pos_succ.select(Some(0));
@@ -719,7 +714,7 @@ impl ResultStatus {
                     self.pos_succ.select(Some(curr + 1));
                 }
             }
-            true if self.output.as_ref().unwrap().errors.len() > 0 => {
+            true if !self.output.as_ref().unwrap().errors.is_empty() => {
                 let curr = self.pos_fail.selected().unwrap_or(0);
                 if curr >= self.output.as_ref().unwrap().errors.len() - 1 {
                     self.pos_fail.select(Some(0));
@@ -736,7 +731,7 @@ impl ResultStatus {
             return;
         }
         match self.fail_focus {
-            false if self.output.as_ref().unwrap().success.len() > 0 => {
+            false if !self.output.as_ref().unwrap().success.is_empty() => {
                 let curr = self.pos_succ.selected().unwrap_or(0);
                 if curr == 0 {
                     self.pos_succ
@@ -745,15 +740,13 @@ impl ResultStatus {
                     self.pos_succ.select(Some(curr - 1));
                 }
             }
-            true => {
-                if self.output.as_ref().unwrap().errors.len() > 0 {
-                    let curr = self.pos_fail.selected().unwrap_or(0);
-                    if curr == 0 {
-                        self.pos_fail
-                            .select(Some(self.output.as_ref().unwrap().errors.len() - 1));
-                    } else {
-                        self.pos_fail.select(Some(curr - 1));
-                    }
+            true if !self.output.as_ref().unwrap().errors.is_empty() => {
+                let curr = self.pos_fail.selected().unwrap_or(0);
+                if curr == 0 {
+                    self.pos_fail
+                        .select(Some(self.output.as_ref().unwrap().errors.len() - 1));
+                } else {
+                    self.pos_fail.select(Some(curr - 1));
                 }
             }
             _ => (),
@@ -764,10 +757,12 @@ impl ResultStatus {
             return;
         }
         match self.fail_focus {
-            false if self.output.as_ref().unwrap().success.len() > 0 => {
+            false if !self.output.as_ref().unwrap().success.is_empty() => {
                 self.pos_succ.select(Some(0))
             }
-            true if self.output.as_ref().unwrap().errors.len() > 0 => self.pos_fail.select(Some(0)),
+            true if !self.output.as_ref().unwrap().errors.is_empty() => {
+                self.pos_fail.select(Some(0))
+            }
             _ => (),
         }
     }
@@ -777,10 +772,10 @@ impl ResultStatus {
             return;
         }
         match self.fail_focus {
-            false if self.output.as_ref().unwrap().success.len() > 0 => self
+            false if !self.output.as_ref().unwrap().success.is_empty() => self
                 .pos_succ
                 .select(Some(self.output.as_ref().unwrap().success.len() - 1)),
-            true if self.output.as_ref().unwrap().errors.len() > 0 => self
+            true if !self.output.as_ref().unwrap().errors.is_empty() => self
                 .pos_fail
                 .select(Some(self.output.as_ref().unwrap().errors.len() - 1)),
             _ => (),
@@ -792,7 +787,7 @@ impl ResultStatus {
 fn render_menu(buf: &mut Buffer, state: &mut ListState, title: Rect, body: Rect, footer: Rect) {
     let items = MENU_ITEMS
         .into_iter()
-        .map(|i| ListItem::new(i))
+        .map(ListItem::new)
         .collect::<Vec<ListItem>>();
     let list = List::new(items)
         .highlight_style(Style::new().reversed())
@@ -903,9 +898,8 @@ fn render_clean(buf: &mut Buffer, options: &mut CleanState, title: Rect, body: R
     text.push(line);
     text.push(second_line);
 
-    match &options.error {
-        Some(e) => text.push(Line::from(e.as_str().red()).centered()),
-        None => (),
+    if let Some(e) = &options.error {
+        text.push(Line::from(e.as_str().red()).centered())
     };
 
     Paragraph::new(text).render(inner_footer, buf);
@@ -933,13 +927,13 @@ fn render_running_clean(
     let [loading_area, flags_area, log_area] = body_split.areas(body);
     let loading_split = Layout::horizontal([
         Constraint::Length(
-            (&options.path.to_str().unwrap().len() + "Scanning Path:".len() + 5) as u16,
+            (options.path.to_str().unwrap().len() + "Scanning Path:".len() + 5) as u16,
         ),
         Constraint::Min(0),
     ]);
 
     let [text, spinner_area] = loading_split.areas(loading_area);
-    Line::from(format!("Scanning Path: {:?}", &options.path))
+    Line::from(format!("Scanning Path: {:?}", options.path))
         .bold()
         .render(text, buf);
     spinner.render(spinner_area, buf);
@@ -998,19 +992,16 @@ fn render_results_screen(
     if results.output.is_none() {
         return;
     }
-    match state {
-        Status::Failed(s) => {
-            Paragraph::new(
-                Line::from(format!("Got an error in the run: {s}"))
-                    .bold()
-                    .centered()
-                    .red(),
-            )
-            .block(Block::bordered())
-            .render(body, buf);
-            return;
-        }
-        _ => (),
+    if let Status::Failed(s) = state {
+        Paragraph::new(
+            Line::from(format!("Got an error in the run: {s}"))
+                .bold()
+                .centered()
+                .red(),
+        )
+        .block(Block::bordered())
+        .render(body, buf);
+        return;
     }
 
     let report = results.output.as_ref().unwrap();

@@ -16,7 +16,7 @@ pub struct CleanReport {
 }
 
 pub fn clean_main(
-    path: &PathBuf,
+    path: &Path,
     remove_empty: bool,
     real_run: bool,
     sender: Sender<Message>,
@@ -34,7 +34,7 @@ pub fn clean_main(
 }
 
 pub fn sort_main(
-    path: &PathBuf,
+    path: &Path,
     num_sorting: usize,
     sender: Sender<Message>,
 ) -> Result<CleanReport, String> {
@@ -73,9 +73,9 @@ pub fn run_clean(
     }
     Ok((succ, err))
 }
-pub fn run_sort(files: &mut Vec<(u64, PathBuf)>, num_sorting: usize) -> Vec<String> {
+pub fn run_sort(files: &mut [(u64, PathBuf)], num_sorting: usize) -> Vec<String> {
     let mut res = Vec::new();
-    files.sort_by(|a, b| b.0.cmp(&a.0));
+    files.sort_by_key(|a| std::cmp::Reverse(a.0));
     let len = num_sorting.min(files.len());
     for i in 0..len {
         let curr = files.get(i).unwrap();
@@ -110,10 +110,10 @@ pub fn populate_paths(
     let mut dir_paths: Vec<PathBuf> = vec![path.to_path_buf()];
     let mut file_paths: Vec<(u64, PathBuf)> = Vec::new();
     while let Some(curr_dir) = dir_paths.pop() {
-        let _ = sender.send(Message::Log(format!("Starting to scan {:?}", &curr_dir,)));
+        let _ = sender.send(Message::Log(format!("Starting to scan {:?}", curr_dir,)));
         let tester = fs::read_dir(&curr_dir);
         if let Err(e) = tester {
-            err.push(format!("Could not read {:?}, got an error {e}", &curr_dir));
+            err.push(format!("Could not read {:?}, got an error {e}", curr_dir));
             continue;
         }
         let curr_dir: Vec<DirEntry> = tester
@@ -235,7 +235,7 @@ fn scan_and_clean(
     let mut succ: Vec<String> = Vec::new();
     let mut fail: Vec<String> = Vec::new();
     let mut index_to_first_hash: HashMap<usize, [u8; 4096]> = HashMap::new();
-    let prefix = len.min(4096) as usize;
+    let prefix = len.min(4096);
     fail.append(&mut read_first_4096_bytes(
         &files,
         &mut index_to_first_hash,
@@ -244,7 +244,7 @@ fn scan_and_clean(
     ));
     if len == 0 && remove_empty {
         let _ = sender.send(Message::Log(String::from("Starting to scan empty files")));
-        return Ok(delete_empty(files, real_run, sender.clone())?);
+        return delete_empty(files, real_run, sender.clone());
     }
     let mut gone_over = vec![false; files.len()];
     for i in 0..files.len() {
@@ -300,7 +300,7 @@ fn scan_and_clean(
                     "Comparing {:?} and {:?}",
                     curr_file, compare
                 )));
-                let comp2 = compare_2_files(&mut file1, &mut file2, (len - 4096) as usize);
+                let comp2 = compare_2_files(&mut file1, &mut file2, len - 4096);
                 if let Err(e) = comp2 {
                     fail.push(format!(
                         "Could not compare {:?}, {:?}, got an error {e}",
@@ -348,19 +348,19 @@ fn read_first_4096_bytes(
         let mut buf = [0u8; 4096];
         let curr = File::open(&files[i]);
         if let Err(e) = curr.as_ref() {
-            fail.push(format!("Could not open {:?}, got an error: {e}", &files[i]));
+            fail.push(format!("Could not open {:?}, got an error: {e}", files[i]));
             continue;
         }
         let mut curr = curr.unwrap();
 
         let read = curr.read_exact(&mut buf[0..len]);
         if let Err(e) = read {
-            fail.push(format!("Could not read {:?}, got an error: {e}", &files[i]));
+            fail.push(format!("Could not read {:?}, got an error: {e}", files[i]));
             continue;
         }
         let _ = sender.send(Message::Log(format!(
             "Cacheing first 4096 bytes of {:?}",
-            &files[i]
+            files[i]
         )));
         mapping.insert(i, buf);
     }
@@ -377,11 +377,11 @@ fn delete_empty(
     for path in empty_files {
         let _ = sender.send(Message::Log(format!(
             "Checking to see if {:?} is actually empty before deleting",
-            &path
+            path
         )));
         let file = File::open(&path);
         if let Err(e) = file.as_ref() {
-            fail.push(format!("Could not open {:?}, got an error: {e}", &path));
+            fail.push(format!("Could not open {:?}, got an error: {e}", path));
             continue;
         }
         let file = file.unwrap();
@@ -390,7 +390,7 @@ fn delete_empty(
         if let Err(e) = metadata {
             fail.push(format!(
                 "Could not access the metadata of {:?}, got an error: {e}",
-                &path
+                path
             ));
             continue;
         }
@@ -400,7 +400,7 @@ fn delete_empty(
                 if let Err(e) = fs::remove_file(&path) {
                     fail.push(format!(
                         "Could not remove file {:?}, got an error: {e}",
-                        &path
+                        path
                     ));
 
                     continue;
