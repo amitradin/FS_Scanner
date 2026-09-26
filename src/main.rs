@@ -173,7 +173,7 @@ impl SortOptions {
         SortOptions {
             path,
             num_show: "20".to_string(),
-            path_error: None,
+            path_error: Some("Invalid path".to_string()),
             num_error: None,
             focus: state,
         }
@@ -245,12 +245,11 @@ impl CleanState {
             remove_empty: false,
             path,
             focus: Row::RealRun,
-            error: None,
+            error: Some("Invalid Path".to_string()),
         }
     }
     // move to the next option
     fn next(&mut self) {
-        self.error = None;
         let i = self.focus.index();
 
         if i >= Row::ALL.len() - 1 {
@@ -261,7 +260,6 @@ impl CleanState {
     }
     // move to the previous option
     fn prev(&mut self) {
-        self.error = None;
         let i = self.focus.index();
 
         if i == 0 {
