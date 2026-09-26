@@ -33,7 +33,7 @@ pub fn clean_main(
     })
 }
 
-fn sort_main(
+pub fn sort_main(
     path: &PathBuf,
     num_sorting: usize,
     sender: Sender<Message>,

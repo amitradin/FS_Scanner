@@ -1,5 +1,5 @@
 mod tools;
-use crate::tools::clean_main;
+use crate::tools::{clean_main, sort_main};
 use tools::CleanReport;
 
 use std::path::PathBuf;
@@ -24,6 +24,7 @@ struct App {
     exit: bool,
     menu: MenuState,
     clean: CleanState,
+    sort: SortOptions,
     run_state: RunState,
     curr_screen: Screen,
     result_state: ResultStatus,
@@ -58,6 +59,15 @@ struct CleanState {
     focus: Row,
 }
 
+// Holds the data about the sorting path and num of files to show
+struct SortOptions {
+    path: String,
+    num_show: String,
+    path_error: Option<String>,
+    num_error: Option<String>,
+    focus: ListState,
+}
+
 /// this enum holds the current state of the clean run
 #[derive(Default)]
 enum Status {
@@ -76,13 +86,15 @@ struct ResultStatus {
     fail_focus: bool,
 }
 
-/// Current screen selected
+/// CurrentS screen selected
 #[derive(Clone, Copy, PartialEq)]
 enum Screen {
     Main,
     CleanOptions,
     RunningClean,
     CleanResults,
+    SortOptions,
+    RunnignSort,
 }
 
 /// Holds data that the sender sends from the cleaning job  
@@ -154,13 +166,85 @@ impl MenuState {
     }
 }
 
+impl SortOptions {
+    fn new(path: String) -> Self {
+        let mut state = ListState::default();
+        state.select(Some(0));
+        SortOptions {
+            path,
+            num_show: "20".to_string(),
+            path_error: None,
+            num_error: None,
+            focus: state,
+        }
+    }
+
+    fn push_char(&mut self, ch: char) {
+        if self.focus.selected() == Some(0) {
+            self.path.push(ch);
+            self.validate_path();
+        } else if self.focus.selected() == Some(1) {
+            self.num_show.push(ch);
+            self.validate_num();
+        }
+    }
+
+    fn pop(&mut self) {
+        if self.focus.selected() == Some(0) {
+            self.path.pop();
+            self.validate_path();
+        } else if self.focus.selected() == Some(1) {
+            self.num_show.pop();
+            self.validate_num();
+        }
+    }
+
+    fn validate_path(&mut self) {
+        if !self.is_valid_path() {
+            self.path_error = Some("Invalid Path".to_string());
+        } else {
+            self.path_error = None;
+        }
+    }
+
+    fn change(&mut self) {
+        match self.focus.selected() {
+            Some(i) => self.focus.select(Some(1 - i)),
+            None => (),
+        }
+    }
+
+    fn valid_path(&mut self) -> Option<PathBuf> {
+        if !self.is_valid_path() {
+            return None;
+        }
+        Some(PathBuf::from(self.path.trim()))
+    }
+
+    fn validate_num(&mut self) {
+        match self.num_show.as_str().parse::<usize>() {
+            Ok(_) => self.num_error = None,
+            Err(e) => self.num_error = Some(format!("Invalid Number {e}")),
+        }
+    }
+
+    fn is_valid_path(&self) -> bool {
+        let trimmed = &self.path.trim();
+        if trimmed.is_empty() {
+            return false;
+        }
+        let path = PathBuf::from(trimmed);
+        if path.is_dir() { true } else { false }
+    }
+}
+
 impl CleanState {
     // a default method. gets a path.
     fn new(path: String) -> Self {
         CleanState {
             real_run: false,
             remove_empty: false,
-            path: path,
+            path,
             focus: Row::RealRun,
             error: None,
         }
@@ -240,9 +324,19 @@ impl CleanState {
     }
     fn push_char(&mut self, ch: char) {
         self.path.push(ch);
+        if !self.is_valid_path() {
+            self.error = Some("Provided path is not a valid directory".to_string());
+        } else {
+            self.error = None;
+        }
     }
     fn backspace(&mut self) {
         self.path.pop();
+        if !self.is_valid_path() {
+            self.error = Some("Provided path is not a valid directory".to_string());
+        } else {
+            self.error = None;
+        }
     }
     fn is_valid_path(&self) -> bool {
         let trimmed = &self.path.trim();
@@ -336,7 +430,55 @@ impl App {
                     if key.code == KeyCode::Enter {
                         match self.menu.selected() {
                             Some(0) => self.curr_screen = Screen::CleanOptions,
-                            _ => {}
+                            Some(1) => self.curr_screen = Screen::SortOptions,
+                            _ => (),
+                        }
+                    }
+                }
+
+                Screen::SortOptions => {
+                    if key.code == KeyCode::Enter {
+                        let path = self.sort.valid_path();
+                        let num = self.sort.num_show.as_str().parse::<usize>();
+                        match path {
+                            Some(p) if num.is_ok() => {
+                                let (sender, receiver) = mpsc::channel::<Message>();
+                                self.run_state = RunState {
+                                    rx: Some(receiver),
+                                    status: Status::Running,
+                                    log_lines: Vec::new(),
+                                    real_run: false,
+                                    remove_empty: false,
+                                    path: p.clone(),
+                                    tick: 0,
+                                };
+                                std::thread::spawn(move || {
+                                    let res = sort_main(&p, num.unwrap_or(20), sender.clone());
+                                    let _ = sender.send(Message::Done(res));
+                                });
+                                self.curr_screen = Screen::RunnignSort;
+                            }
+                            _ => (),
+                        }
+                    }
+                    if key.code == KeyCode::Esc {
+                        self.curr_screen = Screen::Main;
+                    } else if key.code == KeyCode::Tab
+                        || key.code == KeyCode::BackTab
+                        || key.code == KeyCode::Down
+                        || key.code == KeyCode::Up
+                    {
+                        self.sort.change();
+                    } else {
+                        match key.code {
+                            KeyCode::Char(c)
+                                if key.modifiers.is_empty()
+                                    || key.modifiers == KeyModifiers::SHIFT =>
+                            {
+                                self.sort.push_char(c)
+                            }
+                            KeyCode::Backspace => self.sort.pop(),
+                            _ => (),
                         }
                     }
                 }
@@ -418,6 +560,11 @@ impl App {
                     }
                 }
                 Screen::RunningClean => {
+                    if key.code == KeyCode::Char('q') {
+                        self.exit = true;
+                    }
+                }
+                Screen::RunnignSort => {
                     if key.code == KeyCode::Char('q') {
                         self.exit = true;
                     }
@@ -518,7 +665,7 @@ impl Widget for &mut App {
         let vertical_layout = Layout::vertical([
             Constraint::Length(1),
             Constraint::Min(0),
-            Constraint::Length(4),
+            Constraint::Length(5),
         ]);
 
         let [title, body, footer] = vertical_layout.areas(area);
@@ -526,10 +673,27 @@ impl Widget for &mut App {
         match self.curr_screen {
             Screen::Main => render_menu(buf, &mut self.menu.list, title, body, footer),
             Screen::CleanOptions => render_clean(buf, &mut self.clean, title, body, footer),
-            Screen::RunningClean => {
-                render_running_clean(buf, &mut self.run_state, title, body, footer)
-            }
+            Screen::RunningClean => render_running_clean(
+                "Running Clean",
+                Screen::RunningClean,
+                buf,
+                &mut self.run_state,
+                title,
+                body,
+                footer,
+            ),
+            Screen::SortOptions => render_sort_options(buf, &self.sort, title, body, footer),
+            Screen::RunnignSort => render_running_clean(
+                "Running Sort",
+                Screen::RunnignSort,
+                buf,
+                &mut self.run_state,
+                title,
+                body,
+                footer,
+            ),
             Screen::CleanResults => render_results_screen(
+                "Clean results",
                 buf,
                 &mut self.result_state,
                 &self.run_state.status,
@@ -722,6 +886,7 @@ fn render_clean(buf: &mut Buffer, options: &mut CleanState, title: Rect, body: R
     let footer_block = Block::bordered();
     let inner_footer = footer_block.inner(footer);
     footer_block.render(footer, buf);
+
     let mut text = Vec::new();
     let line = match options.focus {
         Row::Path => {
@@ -733,29 +898,30 @@ fn render_clean(buf: &mut Buffer, options: &mut CleanState, title: Rect, body: R
             .centered()
             .bold(),
     };
+
+    let second_line = Line::from(options.focus.hint()).centered().bold();
     text.push(line);
-    let mut second_line = match &options.error {
-        Some(e) => Line::from(e.as_str().red()),
-        None => Line::from(options.focus.hint()),
-    };
-    second_line = second_line.centered().bold();
     text.push(second_line);
+
+    match &options.error {
+        Some(e) => text.push(Line::from(e.as_str().red()).centered()),
+        None => (),
+    };
 
     Paragraph::new(text).render(inner_footer, buf);
 }
 
 // Loading screen when waiting for clean to finish
 fn render_running_clean(
+    title_str: &str,
+    screen: Screen,
     buf: &mut Buffer,
     options: &RunState,
     title: Rect,
     body: Rect,
     footer: Rect,
 ) {
-    Line::from("Running Clean")
-        .bold()
-        .centered()
-        .render(title, buf);
+    Line::from(title_str).bold().centered().render(title, buf);
 
     let spinner = LinearSpinner::new(options.tick).total_slots(10);
 
@@ -779,20 +945,21 @@ fn render_running_clean(
     spinner.render(spinner_area, buf);
 
     let mut flags = Vec::new();
-    let real_run = match options.real_run {
-        true => Line::from("WARNING - Deleting files").red(),
-        false => Line::from("Dry run - not deleting files").green(),
-    };
+    if screen == Screen::RunningClean {
+        let real_run = match options.real_run {
+            true => Line::from("WARNING - Deleting files").red(),
+            false => Line::from("Dry run - not deleting files").green(),
+        };
 
-    let remove_empty = match options.remove_empty {
-        true => Line::from("Remove empty files: Yes"),
-        false => Line::from("Remove empty files: No"),
-    };
-
-    flags.append(&mut vec![real_run, remove_empty]);
-    Paragraph::new(flags)
-        .block(Block::bordered().title("Flags"))
-        .render(flags_area, buf);
+        let remove_empty = match options.remove_empty {
+            true => Line::from("Remove empty files: Yes"),
+            false => Line::from("Remove empty files: No"),
+        };
+        flags.append(&mut vec![real_run, remove_empty]);
+        Paragraph::new(flags)
+            .block(Block::bordered().title("Flags"))
+            .render(flags_area, buf);
+    }
 
     // To render the logs, we take the last n lines of the log. We use log_area.height to use the
     // current height as an indicator of how many lines we can render. we use -2 since the area is
@@ -818,6 +985,7 @@ fn render_running_clean(
 }
 
 fn render_results_screen(
+    title_str: &str,
     buf: &mut Buffer,
     results: &mut ResultStatus,
     state: &Status,
@@ -825,10 +993,7 @@ fn render_results_screen(
     body: Rect,
     footer: Rect,
 ) {
-    Line::from("Clean Results")
-        .bold()
-        .centered()
-        .render(title, buf);
+    Line::from(title_str).bold().centered().render(title, buf);
 
     if results.output.is_none() {
         return;
@@ -897,12 +1062,73 @@ fn render_results_screen(
     ).bold().centered()).block(Block::bordered()).render(footer, buf);
 }
 
+fn render_sort_options(
+    buf: &mut Buffer,
+    options: &SortOptions,
+    title: Rect,
+    body: Rect,
+    footer: Rect,
+) {
+    Line::from("Sort Options")
+        .bold()
+        .centered()
+        .render(title, buf);
+
+    let body_split = Layout::vertical([
+        Constraint::Length(3),
+        Constraint::Length(3),
+        Constraint::Min(0),
+    ]);
+    let [path_area, num_area, _] = body_split.areas(body);
+    let mut path_par =
+        Paragraph::new(Line::from(options.path.as_str().bold())).block(Block::bordered());
+
+    if options.focus.selected() == Some(0) {
+        match options.is_valid_path() {
+            true => path_par = path_par.block(Block::bordered().border_style(Style::new().green())),
+            false => path_par = path_par.block(Block::bordered().border_style(Style::new().red())),
+        }
+    }
+    path_par.render(path_area, buf);
+
+    let mut num_par =
+        Paragraph::new(Line::from(options.num_show.as_str().bold())).block(Block::bordered());
+    if options.focus.selected() == Some(1) {
+        match options.num_show.as_str().parse::<usize>() {
+            Ok(_) => num_par = num_par.block(Block::bordered().border_style(Style::new().green())),
+            Err(_) => num_par = num_par.block(Block::bordered().border_style(Style::new().red())),
+        }
+    }
+    num_par.render(num_area, buf);
+
+    let mut footer_lines = vec![
+        Line::from("ESC - Main Menu       Enter - Run       Tab/DownArrow - Down       BackTab/UpArrow - Up")
+            .centered()
+            .bold(),
+    ];
+
+    match &options.path_error {
+        None => (),
+        Some(e) => footer_lines.push(Line::from(e.as_str()).centered().red()),
+    }
+
+    match &options.num_error {
+        None => (),
+        Some(e) => footer_lines.push(Line::from(e.as_str()).centered().red()),
+    }
+
+    Paragraph::new(footer_lines)
+        .block(Block::bordered())
+        .render(footer, buf);
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut terminal = ratatui::init();
     let mut app = App {
         exit: false,
         menu: MenuState::new(),
         clean: CleanState::new(String::from("")),
+        sort: SortOptions::new(String::from("")),
         run_state: RunState::default(),
         curr_screen: Screen::Main,
         result_state: ResultStatus::default(),
