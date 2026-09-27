@@ -6,7 +6,7 @@ use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 use std::path::PathBuf;
 
-use crate::Message;
+use crate::structs_and_enums::Message;
 use std::sync::mpsc::Sender;
 
 #[derive(Debug)]
