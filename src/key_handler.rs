@@ -1,4 +1,7 @@
-use crate::structs_and_enums::{Action, App, Message, Row, RunState, Screen, Status};
+use crate::structs_and_enums::{
+    Action, App, CleanState, LogState, Message, ResultStatus, Row, RunState, Screen, SortOptions,
+    Status,
+};
 use crate::tools::{clean_main, sort_main};
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use std::sync::mpsc;
@@ -152,7 +155,16 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> std::io::Result<()> {
                     app.exit = true;
                 }
             }
+            //On Esc we should reset the app
             Screen::CleanResults => {
+                if key.code == KeyCode::Esc {
+                    app.curr_screen = Screen::Main;
+                    app.clean = CleanState::new(String::from(""));
+                    app.sort = SortOptions::new(String::from(""));
+                    app.run_state = RunState::default();
+                    app.result_state = ResultStatus::default();
+                    app.log = LogState::default();
+                }
                 if key.code == KeyCode::Char('q') {
                     app.exit = true;
                 }

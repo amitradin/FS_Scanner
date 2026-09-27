@@ -60,6 +60,13 @@ pub fn run_clean(
     sender: Sender<Message>,
 ) -> Result<(Vec<String>, Vec<String>), String> {
     let files = group_into_similar(files, sender.clone());
+    let files = files.into_iter().filter(|(size, vec)| {
+        if *size > 0u64 {
+            vec.len() > 1usize
+        } else {
+            false
+        }
+    });
     let mut succ = Vec::new();
     let mut err = Vec::new();
     for item in files {

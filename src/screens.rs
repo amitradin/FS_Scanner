@@ -224,9 +224,6 @@ pub fn render_results_screen(
 ) {
     Line::from(title_str).bold().centered().render(title, buf);
 
-    if results.output.is_none() {
-        return;
-    }
     if let Status::Failed(s) = state {
         Paragraph::new(
             Line::from(format!("Got an error in the run: {s}"))
@@ -236,6 +233,9 @@ pub fn render_results_screen(
         )
         .block(Block::bordered())
         .render(body, buf);
+        return;
+    }
+    if results.output.is_none() {
         return;
     }
 
@@ -284,7 +284,7 @@ pub fn render_results_screen(
     StatefulWidget::render(err_items, fail_area, buf, &mut results.pos_fail);
 
     Paragraph::new(Line::from(
-        "q - quit       J/DownArrow - Move Down       K/UpArrow - Move Up       Tab - Switch between success/error       l - Log Screen",
+        "q - quit       J/DownArrow - Move Down       K/UpArrow - Move Up       Tab - Switch between success/error       l - Log Screen       ESC - Main Menu",
     ).bold().centered()).block(Block::bordered()).render(footer, buf);
 }
 
