@@ -9,6 +9,8 @@ use std::path::PathBuf;
 use crate::structs_and_enums::Message;
 use std::sync::mpsc::Sender;
 
+const BUF_SIZE: usize = 1024 * 1024; //1 MB
+
 #[derive(Debug)]
 pub struct CleanReport {
     pub success: Vec<String>,
@@ -64,22 +66,49 @@ pub fn run_clean(
         if *size > 0u64 {
             vec.len() > 1usize
         } else {
-            false
+            remove_empty
         }
     });
     let mut succ = Vec::new();
     let mut err = Vec::new();
     for item in files {
-        let (mut success, mut fail) = scan_and_clean(
-            item.1,
-            item.0 as usize,
-            remove_empty,
-            real_run,
-            sender.clone(),
-        )?;
-        succ.append(&mut success);
-        err.append(&mut fail)
+        if item.1.len() <= 2 || item.0 == 0 {
+            let (mut success, mut fail) = scan_and_clean(
+                item.1,
+                item.0 as usize,
+                remove_empty,
+                real_run,
+                sender.clone(),
+            )?;
+            succ.append(&mut success);
+            err.append(&mut fail)
+        } else {
+            let prefix_groups = group_by_prefix(item.1, item.0, &mut err);
+            for group in prefix_groups {
+                let dup_group = if item.0 as usize <= 4096 {
+                    vec![group]
+                } else if group.len() == 2 {
+                    match tails_equal(&group[0], &group[1], item.0) {
+                        Ok(true) => vec![group],
+                        Ok(false) => vec![],
+                        Err(e) => {
+                            err.push(format!(
+                                "Could not compare {:?}, and {:?}, got an error: {e}",
+                                group[0], group[1]
+                            ));
+                            vec![]
+                        }
+                    }
+                } else {
+                    group_by_hash(group, item.0, &mut err)
+                };
+                for vec in dup_group {
+                    remove_by_hash(vec, &mut err, &mut succ, real_run);
+                }
+            }
+        }
     }
+
     Ok((succ, err))
 }
 pub fn run_sort(files: &mut [(u64, PathBuf)], num_sorting: usize) -> Vec<String> {
@@ -215,10 +244,6 @@ fn compare_2_files(file1: &mut File, file2: &mut File, len: usize) -> Result<boo
     let mut chunk1 = [0u8; 4096];
     let mut chunk2 = [0u8; 4096];
 
-    // If size has changed since gropued
-    if file1.metadata()?.len() != file2.metadata()?.len() {
-        return Ok(false);
-    }
     while remain > 0 {
         let n = remain.min(4096);
         file1.read_exact(&mut chunk1[0..n])?;
@@ -277,38 +302,64 @@ fn scan_and_clean(
                 continue;
             }
 
+            let file1 = File::open(curr_file);
+            if let Err(e) = file1 {
+                fail.push(format!("Could not open {:?}, got an error: {e}", curr_file));
+                continue;
+            }
+            let mut file1 = file1.unwrap();
+
+            let file2 = File::open(compare);
+
+            if let Err(e) = file2 {
+                fail.push(format!("Could not open {:?}, got an error: {e}", compare));
+                continue;
+            }
+            let mut file2 = file2.unwrap();
+
+            let _ = sender.send(Message::Log(format!(
+                "Comparing {:?} and {:?}",
+                curr_file, compare
+            )));
+
+            let (md1, md2) = (file1.metadata(), file2.metadata());
+            if let Err(e) = md1 {
+                fail.push(format!(
+                    "Could not get the metadata of {:?}, got an error: {e}",
+                    curr_file,
+                ));
+                continue;
+            }
+
+            if let Err(e) = md2 {
+                fail.push(format!(
+                    "Could not get the metadata of {:?}, got an error: {e}",
+                    compare,
+                ));
+                continue;
+            }
+
+            if md1.unwrap().len() != len as u64 || md2.unwrap().len() != len as u64 {
+                continue;
+            }
+
             // if the file size is <= 4096 the the prefix check is all that was needed, and we do
             // not need to read the entire file.
             // Otherwise, We don't want to read the entire first 4096 bytes again so we should start
             // from byte 4096
             if len > 4096 {
-                let file1 = File::open(curr_file);
-                if let Err(e) = file1 {
-                    fail.push(format!("Could not open {:?}, got an error: {e}", curr_file));
-                    continue;
-                }
-                let mut file1 = file1.unwrap();
                 let seek = file1.seek(SeekFrom::Start(4096));
                 if let Err(e) = seek {
                     fail.push(format!("Could not seek {:?}, got an error: {e}", curr_file));
                     continue;
                 }
-                let file2 = File::open(compare);
 
-                if let Err(e) = file2 {
-                    fail.push(format!("Could not open {:?}, got an error: {e}", compare));
-                    continue;
-                }
-                let mut file2 = file2.unwrap();
                 let seek = file2.seek(SeekFrom::Start(4096));
                 if let Err(e) = seek {
                     fail.push(format!("Could not seek {:?}, got an error: {e}", compare));
                     continue;
                 }
-                let _ = sender.send(Message::Log(format!(
-                    "Comparing {:?} and {:?}",
-                    curr_file, compare
-                )));
+
                 let comp2 = compare_2_files(&mut file1, &mut file2, len - 4096);
                 if let Err(e) = comp2 {
                     fail.push(format!(
@@ -425,4 +476,103 @@ fn delete_empty(
         }
     }
     Ok((succ, fail))
+}
+
+fn hash_file(
+    buf: &mut [u8],
+    path: &Path,
+    len: u64,
+) -> Result<blake3::Hash, Box<dyn std::error::Error>> {
+    let mut file = File::open(path)?;
+    if file.metadata()?.len() != len {
+        return Err(Box::from("File length has changed sicne the walk"));
+    }
+    let mut hasher = blake3::Hasher::new();
+    let mut remain = len as usize;
+    while remain > 0 {
+        let n = remain.min(BUF_SIZE);
+        file.read_exact(&mut buf[0..n])?;
+        hasher.update(&buf[0..n]);
+        remain -= n;
+    }
+
+    Ok(hasher.finalize())
+}
+
+fn group_by_hash(paths: Vec<PathBuf>, len: u64, fail: &mut Vec<String>) -> Vec<Vec<PathBuf>> {
+    let mut buf = vec![0u8; BUF_SIZE];
+    let mut by_hash: HashMap<blake3::Hash, Vec<PathBuf>> = HashMap::new();
+    for path in paths {
+        let hash = hash_file(&mut buf, &path, len);
+        match hash {
+            Ok(val) => by_hash.entry(val).or_default().push(path),
+            Err(e) => fail.push(format!("Could not hash {path:?} got an error: {e}")),
+        }
+    }
+    by_hash.into_values().filter(|vec| vec.len() > 1).collect()
+}
+
+fn remove_by_hash(
+    paths: Vec<PathBuf>,
+    fail: &mut Vec<String>,
+    succ: &mut Vec<String>,
+    real_run: bool,
+) {
+    for element in paths.iter().skip(1) {
+        if real_run {
+            if let Err(e) = fs::remove_file(element) {
+                fail.push(format!(
+                    "Could not remove file {:?}, got an error: {e}",
+                    element
+                ));
+
+                continue;
+            } else {
+                succ.push(format!(
+                    "Removing file \n{:?} \nit is equal to \n{:?}\n",
+                    element,
+                    paths.first().unwrap_or(&PathBuf::default())
+                ));
+            }
+        } else {
+            succ.push(format!(
+                "This is a dry run, Would remove file \n{:?} \nit is equal to \n{:?}\n",
+                element,
+                paths.first().unwrap_or(&PathBuf::default())
+            ))
+        }
+    }
+}
+
+fn group_by_prefix(paths: Vec<PathBuf>, len: u64, fail: &mut Vec<String>) -> Vec<Vec<PathBuf>> {
+    let mut mapping: HashMap<blake3::Hash, Vec<PathBuf>> = HashMap::new();
+    let n = (len as usize).min(4096);
+    let mut buf = [0u8; 4096];
+    for path in paths {
+        let res = File::open(&path).and_then(|mut f| f.read_exact(&mut buf[0..n]));
+        match res {
+            Ok(()) => mapping
+                .entry(blake3::hash(&buf[0..n]))
+                .or_default()
+                .push(path),
+            Err(e) => fail.push(format!("Could not read {path:?}, got an error: {e}")),
+        }
+    }
+    mapping
+        .into_values()
+        .filter(|entry| entry.len() > 1)
+        .collect()
+}
+
+fn tails_equal(a: &Path, b: &Path, len: u64) -> std::io::Result<bool> {
+    let mut file1 = File::open(a)?;
+    let mut file2 = File::open(b)?;
+
+    if file1.metadata()?.len() != len || file2.metadata()?.len() != len {
+        return Ok(false);
+    }
+
+    file2.seek(SeekFrom::Start(4096))?;
+    file1.seek(SeekFrom::Start(4096))?;
+    compare_2_files(&mut file1, &mut file2, len as usize - 4096)
 }

@@ -197,7 +197,7 @@ pub fn render_running_clean(
         .log_lines
         .iter()
         .rev()
-        .take((log_area.height - 2) as usize)
+        .take((log_area.height.saturating_sub(2)) as usize)
         .rev()
         .map(|log| ListItem::new(log.as_str()))
         .collect::<Vec<ListItem>>();
