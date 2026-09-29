@@ -14,23 +14,16 @@ const BUF_SIZE: usize = 1024 * 1024; //1 MB
 
 #[derive(Debug)]
 pub struct CleanReport {
-    pub success: Vec<String>,
+    pub success: Vec<(String, PathBuf)>,
     pub errors: Vec<String>,
 }
 
-type ComplexReturn = Result<(Vec<(u64, PathBuf)>, Vec<String>), String>;
-
-pub fn clean_main(
-    path: &Path,
-    remove_empty: bool,
-    real_run: bool,
-    sender: Sender<Message>,
-) -> Result<CleanReport, String> {
+pub fn clean_main(path: &Path, sender: Sender<Message>) -> Result<CleanReport, String> {
     let mut fail = Vec::new();
     let _ = sender.send(Message::Log(String::from("Starting to populate paths")));
-    let (files, mut err) = populate_paths(path, remove_empty, true, sender.clone())?;
+    let (files, mut err) = populate_paths(path, true, sender.clone());
     fail.append(&mut err);
-    let (succ, mut err) = run_clean(files, remove_empty, real_run, sender.clone())?;
+    let (succ, mut err) = run_clean(files, sender.clone());
     fail.append(&mut err);
     Ok(CleanReport {
         success: succ,
@@ -43,7 +36,7 @@ pub fn sort_main(
     num_sorting: usize,
     sender: Sender<Message>,
 ) -> Result<CleanReport, String> {
-    let (mut files, mut failed) = populate_paths(path, false, false, sender.clone())?;
+    let (mut files, mut failed) = populate_paths(path, false, sender.clone());
     let mut fail = Vec::new();
     fail.append(&mut failed);
     let _ = sender.send(Message::Log(format!(
@@ -52,41 +45,35 @@ pub fn sort_main(
     )));
     let succ = run_sort(&mut files, num_sorting);
     Ok(CleanReport {
-        success: succ,
+        success: (succ),
         errors: fail,
     })
 }
 pub fn run_clean(
     files: Vec<(u64, PathBuf)>,
-    remove_empty: bool,
-    real_run: bool,
     sender: Sender<Message>,
-) -> Result<(Vec<String>, Vec<String>), String> {
+) -> (Vec<(String, PathBuf)>, Vec<String>) {
     let files = group_into_similar(files, sender.clone());
     let files = files.into_iter().filter(|(size, vec)| {
         if *size > 0u64 {
             vec.len() > 1usize
         } else {
-            remove_empty
+            true
         }
     });
-    let mut succ_fin: Vec<String> = Vec::new();
+
+    let mut succ_fin: Vec<(String, PathBuf)> = Vec::new();
     let mut fail_fin: Vec<String> = Vec::new();
 
     let groups: Vec<_> = files.collect();
-    let results: Vec<(Vec<String>, Vec<String>)> = groups
+    let results: Vec<(Vec<(String, PathBuf)>, Vec<String>)> = groups
         .into_par_iter()
         .map(|item| {
             let mut succ = Vec::new();
             let mut err = Vec::new();
-            if item.1.len() <= 2 || item.0 == 0 {
-                let (mut success, mut fail) = scan_and_clean(
-                    item.1,
-                    item.0 as usize,
-                    remove_empty,
-                    real_run,
-                    sender.clone(),
-                );
+            if item.0 == 0 {
+                let (mut success, mut fail) =
+                    scan_and_clean(item.1, item.0 as usize, sender.clone());
 
                 succ.append(&mut success);
                 err.append(&mut fail)
@@ -111,7 +98,7 @@ pub fn run_clean(
                         group_by_hash(group, item.0, &mut err)
                     };
                     for vec in dup_group {
-                        remove_by_hash(vec, &mut err, &mut succ, real_run);
+                        remove_by_hash(vec, &mut succ);
                     }
                 }
             }
@@ -123,18 +110,17 @@ pub fn run_clean(
         fail_fin.append(&mut err);
     }
 
-    Ok((succ_fin, fail_fin))
+    (succ_fin, fail_fin)
 }
-pub fn run_sort(files: &mut [(u64, PathBuf)], num_sorting: usize) -> Vec<String> {
+pub fn run_sort(files: &mut [(u64, PathBuf)], num_sorting: usize) -> Vec<(String, PathBuf)> {
     let mut res = Vec::new();
     files.sort_by_key(|a| std::cmp::Reverse(a.0));
     let len = num_sorting.min(files.len());
     for i in 0..len {
         let curr = files.get(i).unwrap();
-        res.push(format!(
-            "{:.2}MB : {:?}",
-            (curr.0 as f64 / 1_000_000.0),
-            curr.1
+        res.push((
+            format!("{:.2}MB : {:?}", (curr.0 as f64 / 1_000_000.0), curr.1),
+            PathBuf::default(),
         ))
     }
     res
@@ -157,24 +143,22 @@ const BUNDLE_EXTS: &[&str] = &[
 /// threads steal subdirectories from busy ones and uneven trees still split evenly.
 pub fn populate_paths(
     path: &Path,
-    remove_empty: bool,
     is_clean: bool,
     sender: Sender<Message>,
-) -> ComplexReturn {
-    Ok(walk(path.to_path_buf(), remove_empty, is_clean, &sender))
+) -> (Vec<(u64, PathBuf)>, Vec<String>) {
+    walk(path.to_path_buf(), is_clean, &sender)
 }
 
 /// Scans `dir`, then walks all of its subdirectories in parallel and merges their results.
 fn walk(
     dir: PathBuf,
-    remove_empty: bool,
     is_clean: bool,
     sender: &Sender<Message>,
 ) -> (Vec<(u64, PathBuf)>, Vec<String>) {
-    let (mut files, subdirs, mut err) = scan_dir(&dir, remove_empty, is_clean, sender);
+    let (mut files, subdirs, mut err) = scan_dir(&dir, is_clean, sender);
     let nested: Vec<_> = subdirs
         .into_par_iter()
-        .map(|sub| walk(sub, remove_empty, is_clean, sender))
+        .map(|sub| walk(sub, is_clean, sender))
         .collect();
     for (mut sub_files, mut sub_err) in nested {
         files.append(&mut sub_files);
@@ -186,7 +170,6 @@ fn walk(
 /// Reads a single directory. Returns its files, the subdirectories to descend into, and errors.
 fn scan_dir(
     dir: &Path,
-    remove_empty: bool,
     is_clean: bool,
     sender: &Sender<Message>,
 ) -> (Vec<(u64, PathBuf)>, Vec<PathBuf>, Vec<String>) {
@@ -230,7 +213,7 @@ fn scan_dir(
         };
         if metadata.is_file() {
             // HardLink
-            if metadata.nlink() == 1 && (metadata.len() > 0 || remove_empty) {
+            if metadata.nlink() == 1 {
                 files.push((metadata.len(), entry.path()));
             }
         } else if metadata.is_dir() {
@@ -295,13 +278,10 @@ fn compare_2_files(file1: &mut File, file2: &mut File, len: usize) -> Result<boo
 fn scan_and_clean(
     files: Vec<PathBuf>,
     len: usize,
-    remove_empty: bool,
-    real_run: bool,
     sender: Sender<Message>,
-) -> (Vec<String>, Vec<String>) {
+) -> (Vec<(String, PathBuf)>, Vec<String>) {
     // A cache of first 4096 bytes of the file. This can help on small files. This can reduce the
     // total reads from O(n^2) to O(n)
-    let mut succ: Vec<String> = Vec::new();
     let mut fail: Vec<String> = Vec::new();
     let mut index_to_first_hash: HashMap<usize, [u8; 4096]> = HashMap::new();
     let prefix = len.min(4096);
@@ -311,125 +291,8 @@ fn scan_and_clean(
         prefix,
         sender.clone(),
     ));
-    if len == 0 && remove_empty {
-        let _ = sender.send(Message::Log(String::from("Starting to scan empty files")));
-        return delete_empty(files, real_run, sender.clone());
-    }
-    let mut gone_over = vec![false; files.len()];
-    for i in 0..files.len() {
-        if gone_over[i] {
-            continue;
-        }
-        let curr_file = &files[i];
-        for j in (i + 1)..files.len() {
-            if gone_over[j] {
-                continue;
-            }
-            let compare = &files[j];
-            if !index_to_first_hash.contains_key(&i) || !index_to_first_hash.contains_key(&j) {
-                continue;
-            }
-
-            // this unwrap will not failed as we checked if the keys are indeed in the map
-            let mut comp = index_to_first_hash.get(&i).unwrap()[0..prefix]
-                == index_to_first_hash.get(&j).unwrap()[0..prefix];
-            if !comp {
-                continue;
-            }
-
-            let file1 = File::open(curr_file);
-            if let Err(e) = file1 {
-                fail.push(format!("Could not open {:?}, got an error: {e}", curr_file));
-                continue;
-            }
-            let mut file1 = file1.unwrap();
-
-            let file2 = File::open(compare);
-
-            if let Err(e) = file2 {
-                fail.push(format!("Could not open {:?}, got an error: {e}", compare));
-                continue;
-            }
-            let mut file2 = file2.unwrap();
-
-            let _ = sender.send(Message::Log(format!(
-                "Comparing {:?} and {:?}",
-                curr_file, compare
-            )));
-
-            let (md1, md2) = (file1.metadata(), file2.metadata());
-            if let Err(e) = md1 {
-                fail.push(format!(
-                    "Could not get the metadata of {:?}, got an error: {e}",
-                    curr_file,
-                ));
-                continue;
-            }
-
-            if let Err(e) = md2 {
-                fail.push(format!(
-                    "Could not get the metadata of {:?}, got an error: {e}",
-                    compare,
-                ));
-                continue;
-            }
-
-            if md1.unwrap().len() != len as u64 || md2.unwrap().len() != len as u64 {
-                continue;
-            }
-
-            // if the file size is <= 4096 the the prefix check is all that was needed, and we do
-            // not need to read the entire file.
-            // Otherwise, We don't want to read the entire first 4096 bytes again so we should start
-            // from byte 4096
-            if len > 4096 {
-                let seek = file1.seek(SeekFrom::Start(4096));
-                if let Err(e) = seek {
-                    fail.push(format!("Could not seek {:?}, got an error: {e}", curr_file));
-                    continue;
-                }
-
-                let seek = file2.seek(SeekFrom::Start(4096));
-                if let Err(e) = seek {
-                    fail.push(format!("Could not seek {:?}, got an error: {e}", compare));
-                    continue;
-                }
-
-                let comp2 = compare_2_files(&mut file1, &mut file2, len - 4096);
-                if let Err(e) = comp2 {
-                    fail.push(format!(
-                        "Could not compare {:?}, {:?}, got an error {e}",
-                        curr_file, compare
-                    ));
-                    continue;
-                }
-                comp = comp2.unwrap();
-            }
-
-            if comp {
-                if real_run {
-                    if let Err(e) = fs::remove_file(compare) {
-                        fail.push(format!(
-                            "Could not remove file {compare:?}, got an error: {e}"
-                        ));
-                        continue;
-                    } else {
-                        succ.push(format!(
-                            "Removing file \n{:?} \nit is equal to \n{:?}\n",
-                            compare, curr_file
-                        ));
-                    }
-                } else {
-                    succ.push(format!(
-                        "This is a dry run, Would remove file \n{:?} \nit is equal to \n{:?}\n",
-                        compare, curr_file
-                    ));
-                }
-                gone_over[j] = true;
-            }
-        }
-    }
-    (succ, fail)
+    let _ = sender.send(Message::Log(String::from("Starting to scan empty files")));
+    return delete_empty(files, sender.clone());
 }
 
 fn read_first_4096_bytes(
@@ -463,10 +326,9 @@ fn read_first_4096_bytes(
 }
 fn delete_empty(
     empty_files: Vec<PathBuf>,
-    real_run: bool,
     sender: Sender<Message>,
-) -> (Vec<String>, Vec<String>) {
-    let mut succ: Vec<String> = Vec::new();
+) -> (Vec<(String, PathBuf)>, Vec<String>) {
+    let mut succ: Vec<(String, PathBuf)> = Vec::new();
     let mut fail: Vec<String> = Vec::new();
 
     for path in empty_files {
@@ -491,23 +353,7 @@ fn delete_empty(
         }
         let metadata = metadata.unwrap();
         if metadata.len() == 0 {
-            if real_run {
-                if let Err(e) = fs::remove_file(&path) {
-                    fail.push(format!(
-                        "Could not remove file {:?}, got an error: {e}",
-                        path
-                    ));
-
-                    continue;
-                } else {
-                    succ.push(format!("Removed {:?} : sized 0", path));
-                }
-            } else {
-                succ.push(format!(
-                    "This is a dry run, would remove {:?} : sized 0",
-                    path
-                ));
-            }
+            succ.push((format!("{:?} : sized 0", &path), path));
         }
     }
     (succ, fail)
@@ -553,35 +399,13 @@ fn group_by_hash(paths: Vec<PathBuf>, len: u64, fail: &mut Vec<String>) -> Vec<V
     by_hash.into_values().filter(|vec| vec.len() > 1).collect()
 }
 
-fn remove_by_hash(
-    paths: Vec<PathBuf>,
-    fail: &mut Vec<String>,
-    succ: &mut Vec<String>,
-    real_run: bool,
-) {
-    for element in paths.iter().skip(1) {
-        if real_run {
-            if let Err(e) = fs::remove_file(element) {
-                fail.push(format!(
-                    "Could not remove file {:?}, got an error: {e}",
-                    element
-                ));
-
-                continue;
-            } else {
-                succ.push(format!(
-                    "Removing file \n{:?} \nit is equal to \n{:?}\n",
-                    element,
-                    paths.first().unwrap_or(&PathBuf::default())
-                ));
-            }
-        } else {
-            succ.push(format!(
-                "This is a dry run, Would remove file \n{:?} \nit is equal to \n{:?}\n",
-                element,
-                paths.first().unwrap_or(&PathBuf::default())
-            ))
-        }
+fn remove_by_hash(paths: Vec<PathBuf>, succ: &mut Vec<(String, PathBuf)>) {
+    let first = paths.first().unwrap().clone();
+    for element in paths.into_iter().skip(1) {
+        succ.push((
+            format!("file \n{:?} \n is equal to \n{:?}\n", &element, first),
+            element,
+        ))
     }
 }
 

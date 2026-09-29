@@ -7,7 +7,7 @@ use ratatui::{
 };
 
 use crate::structs_and_enums::{
-    CleanState, MENU_ITEMS, ResultStatus, Row, RunState, Screen, SortOptions, Status,
+    CleanState, MENU_ITEMS, ResultStatus, Row, RunState, SortOptions, Status,
 };
 
 use ratatui_spinner::LinearSpinner;
@@ -54,43 +54,12 @@ pub fn render_clean(
         .render(title, buf);
 
     let vertical_body = Layout::vertical([
-        Constraint::Length(4),
         Constraint::Length(3),
         Constraint::Length(3),
         Constraint::Min(0),
     ]);
 
-    let [toggles, path, run, _] = vertical_body.areas(body);
-    let mut lines = Vec::new();
-    match options.focus {
-        Row::RealRun => {
-            lines.push(
-                Line::from(format!(">> {}", options.label(Row::RealRun)))
-                    .bold()
-                    .reversed(),
-            );
-            lines.push(Line::from(format!("   {}", options.label(Row::RemoveEmpty))).bold());
-        }
-        Row::RemoveEmpty => {
-            lines.push(Line::from(format!("   {}", options.label(Row::RealRun))).bold());
-            lines.push(
-                Line::from(format!(">> {}", options.label(Row::RemoveEmpty)))
-                    .reversed()
-                    .bold(),
-            );
-        }
-        _ => {
-            lines.push(Line::from(format!("   {}", options.label(Row::RealRun))).bold());
-            lines.push(Line::from(format!("   {}", options.label(Row::RemoveEmpty))).bold());
-        }
-    }
-    let mut toggle_block = Block::bordered().title("Toggles");
-    if options.focus.is_toggle() {
-        toggle_block = toggle_block.border_style(Style::new().green());
-    }
-    let inner_toggle = toggle_block.inner(toggles);
-    toggle_block.render(toggles, buf);
-    Paragraph::new(lines).render(inner_toggle, buf);
+    let [path, run, _] = vertical_body.areas(body);
 
     let mut para_block = Block::bordered().title(Row::Path.name());
     if options.focus == Row::Path {
@@ -143,7 +112,6 @@ pub fn render_clean(
 // Loading screen when waiting for clean to finish
 pub fn render_running_clean(
     title_str: &str,
-    screen: Screen,
     buf: &mut Buffer,
     options: &RunState,
     title: Rect,
@@ -154,12 +122,8 @@ pub fn render_running_clean(
 
     let spinner = LinearSpinner::new(options.tick).total_slots(10);
 
-    let body_split = Layout::vertical([
-        Constraint::Length(2),
-        Constraint::Length(4),
-        Constraint::Min(0),
-    ]);
-    let [loading_area, flags_area, log_area] = body_split.areas(body);
+    let body_split = Layout::vertical([Constraint::Length(2), Constraint::Min(0)]);
+    let [loading_area, log_area] = body_split.areas(body);
     let loading_split = Layout::horizontal([
         Constraint::Length(
             (options.path.to_str().unwrap().len() + "Scanning Path:".len() + 5) as u16,
@@ -172,23 +136,6 @@ pub fn render_running_clean(
         .bold()
         .render(text, buf);
     spinner.render(spinner_area, buf);
-
-    let mut flags = Vec::new();
-    if screen == Screen::RunningClean {
-        let real_run = match options.real_run {
-            true => Line::from("WARNING - Deleting files").red(),
-            false => Line::from("Dry run - not deleting files").green(),
-        };
-
-        let remove_empty = match options.remove_empty {
-            true => Line::from("Remove empty files: Yes"),
-            false => Line::from("Remove empty files: No"),
-        };
-        flags.append(&mut vec![real_run, remove_empty]);
-        Paragraph::new(flags)
-            .block(Block::bordered().title("Flags"))
-            .render(flags_area, buf);
-    }
 
     // To render the logs, we take the last n lines of the log. We use log_area.height to use the
     // current height as an indicator of how many lines we can render. we use -2 since the area is
@@ -244,7 +191,7 @@ pub fn render_results_screen(
     let succ_items = report
         .success
         .iter()
-        .map(|item| ListItem::new(item.as_str()))
+        .map(|(item, _)| ListItem::new(item.as_str()))
         .collect::<List>();
 
     let mut succ_items = succ_items

@@ -82,7 +82,7 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> std::io::Result<()> {
             Screen::CleanOptions => {
                 if key.code == KeyCode::Esc {
                     app.curr_screen = Screen::Main;
-                    app.clean.focus = Row::RealRun;
+                    app.clean.focus = Row::Path;
                     return Ok(());
                 } else if key.code == KeyCode::Down || key.code == KeyCode::Tab {
                     app.clean.next();
@@ -109,11 +109,6 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> std::io::Result<()> {
                     }
                     if key.code == KeyCode::Char('k') {
                         app.clean.prev();
-                    }
-                    if key.code == KeyCode::Char(' ') {
-                        if app.clean.focus.is_toggle() {
-                            app.clean.activate();
-                        }
                     } else if key.code == KeyCode::Enter && app.clean.focus == Row::Run {
                         let action = app.clean.activate();
                         match action {
@@ -135,8 +130,7 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> std::io::Result<()> {
                                 };
 
                                 std::thread::spawn(move || {
-                                    let res =
-                                        clean_main(&path, remove_empty, real_run, sender.clone());
+                                    let res = clean_main(&path, sender.clone());
                                     let _ = sender.send(Message::Done(res));
                                 });
                                 app.curr_screen = Screen::RunningClean;

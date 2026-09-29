@@ -123,8 +123,6 @@ pub enum Action {
 // All of the options of Clean options screen
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Row {
-    RealRun,
-    RemoveEmpty,
     Path,
     Run,
 }
@@ -248,7 +246,7 @@ impl CleanState {
             real_run: false,
             remove_empty: false,
             path,
-            focus: Row::RealRun,
+            focus: Row::Path,
             error: Some("Invalid Path".to_string()),
         }
     }
@@ -257,9 +255,9 @@ impl CleanState {
         let i = self.focus.index();
 
         if i >= Row::ALL.len() - 1 {
-            self.focus = Row::from_index(0).unwrap_or(Row::RealRun);
+            self.focus = Row::from_index(0).unwrap_or(Row::Path);
         } else {
-            self.focus = Row::from_index(i + 1).unwrap_or(Row::RealRun);
+            self.focus = Row::from_index(i + 1).unwrap_or(Row::Path);
         }
     }
     // move to the previous option
@@ -268,22 +266,14 @@ impl CleanState {
 
         if i == 0 {
             //wrap
-            self.focus = Row::from_index(Row::ALL.len() - 1).unwrap_or(Row::RealRun);
+            self.focus = Row::from_index(Row::ALL.len() - 1).unwrap_or(Row::Path);
         } else {
-            self.focus = Row::from_index(i - 1).unwrap_or(Row::RealRun);
+            self.focus = Row::from_index(i - 1).unwrap_or(Row::Path);
         }
     }
     // Maps row to a label (Becuase only toggles will show up in the list We only worry about them)
     pub fn label(&self, row: Row) -> String {
         match row {
-            Row::RealRun => match self.real_run {
-                true => format!("[x] {}", row.name()),
-                false => format!("[ ] {}", row.name()),
-            },
-            Row::RemoveEmpty => match self.remove_empty {
-                true => format!("[x] {}", row.name()),
-                false => format!("[ ] {}", row.name()),
-            },
             _ => String::from(""),
         }
     }
@@ -291,14 +281,6 @@ impl CleanState {
     pub fn activate(&mut self) -> Action {
         self.error = None;
         match self.focus {
-            Row::RealRun => {
-                self.real_run = !self.real_run;
-                Action::Noop
-            }
-            Row::RemoveEmpty => {
-                self.remove_empty = !self.remove_empty;
-                Action::Noop
-            }
             Row::Path => {
                 self.focus = Row::Run;
                 Action::Noop
@@ -353,27 +335,21 @@ impl CleanState {
 
 impl Row {
     // All of the row options such that it would be easier to index into
-    const ALL: [Row; 4] = [Row::RealRun, Row::RemoveEmpty, Row::Path, Row::Run];
+    const ALL: [Row; 2] = [Row::Path, Row::Run];
     pub fn from_index(i: usize) -> Option<Row> {
         Self::ALL.get(i).copied()
     }
     // maps row to name
     pub fn name(self) -> &'static str {
         match self {
-            Row::RealRun => "Real run (Will delete items)",
-            Row::RemoveEmpty => "Remove empty files",
             Row::Path => "Path",
             Row::Run => "Run",
         }
     }
-    pub fn is_toggle(self) -> bool {
-        matches!(self, Row::RealRun | Row::RemoveEmpty)
-    }
+
     // maps row to hint (when hovering)
     pub fn hint(self) -> &'static str {
         match self {
-            Row::RealRun => "space: toggle - WARNING: (deletes files for real)",
-            Row::RemoveEmpty => "space: toggle- also delete zero-byte files",
             Row::Path => "Type to edit",
             Row::Run => "enter: start the scan",
         }
@@ -484,25 +460,13 @@ impl Widget for &mut App {
         match self.curr_screen {
             Screen::Main => render_menu(buf, &mut self.menu.list, title, body, footer),
             Screen::CleanOptions => render_clean(buf, &mut self.clean, title, body, footer),
-            Screen::RunningClean => render_running_clean(
-                "Running Clean",
-                Screen::RunningClean,
-                buf,
-                &self.run_state,
-                title,
-                body,
-                footer,
-            ),
+            Screen::RunningClean => {
+                render_running_clean("Running Clean", buf, &self.run_state, title, body, footer)
+            }
             Screen::SortOptions => render_sort_options(buf, &self.sort, title, body, footer),
-            Screen::RunnignSort => render_running_clean(
-                "Running Sort",
-                Screen::RunnignSort,
-                buf,
-                &self.run_state,
-                title,
-                body,
-                footer,
-            ),
+            Screen::RunnignSort => {
+                render_running_clean("Running Sort", buf, &self.run_state, title, body, footer)
+            }
             Screen::CleanResults => render_results_screen(
                 "Clean results",
                 buf,
