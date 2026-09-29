@@ -1,12 +1,13 @@
 use std::collections::{HashMap, hash_map};
 use std::fs;
-use std::fs::{DirEntry, File};
+use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 use std::path::PathBuf;
 
 use crate::structs_and_enums::Message;
+use rayon::prelude::*;
 use std::sync::mpsc::Sender;
 
 const BUF_SIZE: usize = 1024 * 1024; //1 MB
@@ -69,47 +70,60 @@ pub fn run_clean(
             remove_empty
         }
     });
-    let mut succ = Vec::new();
-    let mut err = Vec::new();
-    for item in files {
-        if item.1.len() <= 2 || item.0 == 0 {
-            let (mut success, mut fail) = scan_and_clean(
-                item.1,
-                item.0 as usize,
-                remove_empty,
-                real_run,
-                sender.clone(),
-            )?;
-            succ.append(&mut success);
-            err.append(&mut fail)
-        } else {
-            let prefix_groups = group_by_prefix(item.1, item.0, &mut err);
-            for group in prefix_groups {
-                let dup_group = if item.0 as usize <= 4096 {
-                    vec![group]
-                } else if group.len() == 2 {
-                    match tails_equal(&group[0], &group[1], item.0) {
-                        Ok(true) => vec![group],
-                        Ok(false) => vec![],
-                        Err(e) => {
-                            err.push(format!(
-                                "Could not compare {:?}, and {:?}, got an error: {e}",
-                                group[0], group[1]
-                            ));
-                            vec![]
+    let mut succ_fin: Vec<String> = Vec::new();
+    let mut fail_fin: Vec<String> = Vec::new();
+
+    let groups: Vec<_> = files.collect();
+    let results: Vec<(Vec<String>, Vec<String>)> = groups
+        .into_par_iter()
+        .map(|item| {
+            let mut succ = Vec::new();
+            let mut err = Vec::new();
+            if item.1.len() <= 2 || item.0 == 0 {
+                let (mut success, mut fail) = scan_and_clean(
+                    item.1,
+                    item.0 as usize,
+                    remove_empty,
+                    real_run,
+                    sender.clone(),
+                );
+
+                succ.append(&mut success);
+                err.append(&mut fail)
+            } else {
+                let prefix_groups = group_by_prefix(item.1, item.0, &mut err);
+                for group in prefix_groups {
+                    let dup_group = if item.0 as usize <= 4096 {
+                        vec![group]
+                    } else if group.len() == 2 {
+                        match tails_equal(&group[0], &group[1], item.0) {
+                            Ok(true) => vec![group],
+                            Ok(false) => vec![],
+                            Err(e) => {
+                                err.push(format!(
+                                    "Could not compare {:?}, and {:?}, got an error: {e}",
+                                    group[0], group[1]
+                                ));
+                                vec![]
+                            }
                         }
+                    } else {
+                        group_by_hash(group, item.0, &mut err)
+                    };
+                    for vec in dup_group {
+                        remove_by_hash(vec, &mut err, &mut succ, real_run);
                     }
-                } else {
-                    group_by_hash(group, item.0, &mut err)
-                };
-                for vec in dup_group {
-                    remove_by_hash(vec, &mut err, &mut succ, real_run);
                 }
             }
-        }
+            (succ, err)
+        })
+        .collect();
+    for (mut succ, mut err) in results {
+        succ_fin.append(&mut succ);
+        fail_fin.append(&mut err);
     }
 
-    Ok((succ, err))
+    Ok((succ_fin, fail_fin))
 }
 pub fn run_sort(files: &mut [(u64, PathBuf)], num_sorting: usize) -> Vec<String> {
     let mut res = Vec::new();
@@ -126,91 +140,112 @@ pub fn run_sort(files: &mut [(u64, PathBuf)], num_sorting: usize) -> Vec<String>
     res
 }
 
-/// Scans the FS from the root provided by the user. The Scan is being done via BFS
+// When cleaning, we don't want to scan bundles, as those directories usually contain duplicates
+const BUNDLE_EXTS: &[&str] = &[
+    "app",
+    "framework",
+    "bundle",
+    "xpc",
+    "plugin",
+    "appex",
+    "kext",
+    "prefPane",
+    "qlgenerator",
+];
+
+/// Scans the FS from the root provided by the user. Every directory is its own rayon task, so idle
+/// threads steal subdirectories from busy ones and uneven trees still split evenly.
 pub fn populate_paths(
     path: &Path,
     remove_empty: bool,
     is_clean: bool,
     sender: Sender<Message>,
 ) -> ComplexReturn {
-    const BUNDLE_EXTS: &[&str] = &[
-        "app",
-        "framework",
-        "bundle",
-        "xpc",
-        "plugin",
-        "appex",
-        "kext",
-        "prefPane",
-        "qlgenerator",
-    ];
+    Ok(walk(path.to_path_buf(), remove_empty, is_clean, &sender))
+}
+
+/// Scans `dir`, then walks all of its subdirectories in parallel and merges their results.
+fn walk(
+    dir: PathBuf,
+    remove_empty: bool,
+    is_clean: bool,
+    sender: &Sender<Message>,
+) -> (Vec<(u64, PathBuf)>, Vec<String>) {
+    let (mut files, subdirs, mut err) = scan_dir(&dir, remove_empty, is_clean, sender);
+    let nested: Vec<_> = subdirs
+        .into_par_iter()
+        .map(|sub| walk(sub, remove_empty, is_clean, sender))
+        .collect();
+    for (mut sub_files, mut sub_err) in nested {
+        files.append(&mut sub_files);
+        err.append(&mut sub_err);
+    }
+    (files, err)
+}
+
+/// Reads a single directory. Returns its files, the subdirectories to descend into, and errors.
+fn scan_dir(
+    dir: &Path,
+    remove_empty: bool,
+    is_clean: bool,
+    sender: &Sender<Message>,
+) -> (Vec<(u64, PathBuf)>, Vec<PathBuf>, Vec<String>) {
+    let mut files = Vec::new();
+    let mut subdirs = Vec::new();
     let mut err = Vec::new();
-    let mut dir_paths: Vec<PathBuf> = vec![path.to_path_buf()];
-    let mut file_paths: Vec<(u64, PathBuf)> = Vec::new();
-    while let Some(curr_dir) = dir_paths.pop() {
-        let _ = sender.send(Message::Log(format!("Starting to scan {:?}", curr_dir,)));
-        let tester = fs::read_dir(&curr_dir);
-        if let Err(e) = tester {
-            err.push(format!("Could not read {:?}, got an error {e}", curr_dir));
+    let _ = sender.send(Message::Log(format!("Starting to scan {:?}", dir)));
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(e) => {
+            err.push(format!("Could not read {:?}, got an error {e}", dir));
+            return (files, subdirs, err);
+        }
+    };
+    for entry in entries.filter_map(|entry| entry.ok()) {
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        // Skip hidden entries and `target` directories.
+        // We should skip symlinks since the metadata describes the link, not the target.
+        if name.starts_with('.')
+            || (!file_type.is_file() && name == "target")
+            || file_type.is_symlink()
+        {
             continue;
         }
-        let curr_dir: Vec<DirEntry> = tester
-            .unwrap() // Safe becuase checked
-            .filter_map(|entry| entry.ok().filter(|e| e.file_type().is_ok()))
-            .filter(|entry| {
-                entry
-                    .file_name()
-                    .to_str()
-                    .map(|s| {
-                        !s.starts_with('.')
-                            && (entry.file_type().unwrap().is_file() || s != "target")
-                    })
-                    .unwrap_or(false)
-            })
-            .collect();
-        for entry in curr_dir {
-            // this will not fail as we filtered for erros in file_type
-            let file_type = entry.file_type().unwrap();
-            // We should skip symlinks since the metadata is fucked.
-            if file_type.is_symlink() {
-                continue;
-            }
 
-            let metadata = entry.metadata();
-            if let Err(e) = metadata {
+        let metadata = match entry.metadata() {
+            Ok(metadata) => metadata,
+            Err(e) => {
                 err.push(format!(
                     "Could not access the metadata of {:?}, got an error {e}",
                     entry.path()
                 ));
                 continue;
             }
-            let metadata = metadata.unwrap();
-            if metadata.file_type().is_file() {
-                // HardLink
-                if metadata.nlink() > 1 {
-                    continue;
-                } else if metadata.len() > 0 || remove_empty {
-                    file_paths.push((metadata.len(), entry.path()));
-                }
-            } else if metadata.is_dir() {
-                let path = entry.path();
-                let mut is_bundle = false;
-                // When cleaning, we don't want to scan for bundles, as those directories usually
-                // contain duplicates
-                if is_clean {
-                    is_bundle = path
-                        .extension()
-                        .and_then(|e| e.to_str())
-                        .is_some_and(|e| BUNDLE_EXTS.iter().any(|b| b.eq_ignore_ascii_case(e)));
-                }
-                if is_bundle {
-                    continue;
-                }
-                dir_paths.push(entry.path());
+        };
+        if metadata.is_file() {
+            // HardLink
+            if metadata.nlink() == 1 && (metadata.len() > 0 || remove_empty) {
+                files.push((metadata.len(), entry.path()));
+            }
+        } else if metadata.is_dir() {
+            let path = entry.path();
+            let is_bundle = is_clean
+                && path
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .is_some_and(|e| BUNDLE_EXTS.iter().any(|b| b.eq_ignore_ascii_case(e)));
+            if !is_bundle {
+                subdirs.push(path);
             }
         }
     }
-    Ok((file_paths, err))
+    (files, subdirs, err)
 }
 
 fn group_into_similar(
@@ -263,7 +298,7 @@ fn scan_and_clean(
     remove_empty: bool,
     real_run: bool,
     sender: Sender<Message>,
-) -> Result<(Vec<String>, Vec<String>), String> {
+) -> (Vec<String>, Vec<String>) {
     // A cache of first 4096 bytes of the file. This can help on small files. This can reduce the
     // total reads from O(n^2) to O(n)
     let mut succ: Vec<String> = Vec::new();
@@ -394,7 +429,7 @@ fn scan_and_clean(
             }
         }
     }
-    Ok((succ, fail))
+    (succ, fail)
 }
 
 fn read_first_4096_bytes(
@@ -430,7 +465,7 @@ fn delete_empty(
     empty_files: Vec<PathBuf>,
     real_run: bool,
     sender: Sender<Message>,
-) -> Result<(Vec<String>, Vec<String>), String> {
+) -> (Vec<String>, Vec<String>) {
     let mut succ: Vec<String> = Vec::new();
     let mut fail: Vec<String> = Vec::new();
 
@@ -475,15 +510,15 @@ fn delete_empty(
             }
         }
     }
-    Ok((succ, fail))
+    (succ, fail)
 }
 
 fn hash_file(
-    buf: &mut [u8],
     path: &Path,
     len: u64,
-) -> Result<blake3::Hash, Box<dyn std::error::Error>> {
+) -> Result<blake3::Hash, Box<dyn std::error::Error + Send + Sync>> {
     let mut file = File::open(path)?;
+    let mut buf = [0u8; BUF_SIZE];
     if file.metadata()?.len() != len {
         return Err(Box::from("File length has changed sicne the walk"));
     }
@@ -500,13 +535,19 @@ fn hash_file(
 }
 
 fn group_by_hash(paths: Vec<PathBuf>, len: u64, fail: &mut Vec<String>) -> Vec<Vec<PathBuf>> {
-    let mut buf = vec![0u8; BUF_SIZE];
     let mut by_hash: HashMap<blake3::Hash, Vec<PathBuf>> = HashMap::new();
-    for path in paths {
-        let hash = hash_file(&mut buf, &path, len);
+    let hashed: Vec<_> = paths
+        .into_par_iter()
+        .map(|path| {
+            let hash = hash_file(&path, len);
+            (path, hash)
+        })
+        .collect();
+
+    for (path, hash) in hashed {
         match hash {
             Ok(val) => by_hash.entry(val).or_default().push(path),
-            Err(e) => fail.push(format!("Could not hash {path:?} got an error: {e}")),
+            Err(e) => fail.push(format!("Could not hash {path:?}, got an error: {e}")),
         }
     }
     by_hash.into_values().filter(|vec| vec.len() > 1).collect()
@@ -547,14 +588,27 @@ fn remove_by_hash(
 fn group_by_prefix(paths: Vec<PathBuf>, len: u64, fail: &mut Vec<String>) -> Vec<Vec<PathBuf>> {
     let mut mapping: HashMap<blake3::Hash, Vec<PathBuf>> = HashMap::new();
     let n = (len as usize).min(4096);
-    let mut buf = [0u8; 4096];
-    for path in paths {
-        let res = File::open(&path).and_then(|mut f| f.read_exact(&mut buf[0..n]));
+
+    let prefix: Vec<(PathBuf, std::io::Result<blake3::Hash>)> = paths
+        .into_par_iter()
+        .map(|path| {
+            let mut buffer = [0u8; 4096];
+            let res = File::open(&path).and_then(|mut f| {
+                if f.metadata()?.len() != len {
+                    return Err(std::io::Error::other(
+                        "File has changed size since the walk",
+                    ));
+                }
+                f.read_exact(&mut buffer[0..n])?;
+                Ok(blake3::hash(&buffer[0..n]))
+            });
+            (path, res)
+        })
+        .collect();
+
+    for (path, res) in prefix {
         match res {
-            Ok(()) => mapping
-                .entry(blake3::hash(&buf[0..n]))
-                .or_default()
-                .push(path),
+            Ok(hash) => mapping.entry(hash).or_default().push(path),
             Err(e) => fail.push(format!("Could not read {path:?}, got an error: {e}")),
         }
     }

@@ -8,4 +8,5 @@ blake3 = "1.8.7"
 crossterm = "0.29.0"
 ratatui = "0.30.2"
 ratatui-spinner = { git = "https://github.com/ratatui/ratatui-spinner", rev = "4489de8" }
+rayon = "1.12.0"
   
