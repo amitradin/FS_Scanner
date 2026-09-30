@@ -11,7 +11,8 @@ use crate::structs_and_enums::{
 };
 
 use crate::theme::{
-    ACCENT, ERR, MUTED, OK, focused_panel, footer_panel, highlight, key_hints, panel, title_bar};
+    ACCENT, ERR, MUTED, OK, focused_panel, footer_panel, highlight, key_hints, panel, title_bar,
+};
 
 use ratatui_spinner::LinearSpinner;
 
@@ -224,13 +225,12 @@ pub fn render_results_screen(
     body: Rect,
     footer: Rect,
 ) {
-    match screen {
-        Some(valid) => match valid {
+    if let Some(valid) = screen {
+        match valid {
             Screen::RunningClean => title_bar("Clean Results").render(title, buf),
             Screen::RunnignSort => title_bar("Sort Results").render(title, buf),
             _ => (),
-        },
-        _ => (),
+        }
     }
 
     if let Status::Failed(s) = state {
@@ -309,7 +309,10 @@ pub fn render_results_screen(
             ),
             Some((Err(msg), _)) => (
                 focused_panel("✖ Delete failed", ERR),
-                vec![Line::from(""), Line::from(format!("✖ {msg}")).fg(ERR).bold()],
+                vec![
+                    Line::from(""),
+                    Line::from(format!("✖ {msg}")).fg(ERR).bold(),
+                ],
             ),
             None => {
                 let path = results
@@ -349,7 +352,6 @@ pub fn render_results_screen(
     ];
 
     if !results.fail_focus
-        && screen == Some(Screen::RunningClean)
         && let Some((_, path)) = results
             .pos_succ
             .selected()
@@ -463,9 +465,7 @@ pub fn render_log(
     title_bar(title_str).render(title, buf);
 
     let list: List = logs.iter().map(|log| ListItem::new(log.as_str())).collect();
-    let list = list
-        .highlight_symbol(" ▶ ")
-        .highlight_style(highlight());
+    let list = list.highlight_symbol(" ▶ ").highlight_style(highlight());
     let log_title = format!("Logs ({})", logs.len());
     let outer_block = panel(&log_title);
     let inner = outer_block.inner(body);

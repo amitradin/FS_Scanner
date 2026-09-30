@@ -38,14 +38,14 @@ pub fn sort_main(
     num_sorting: usize,
     sender: Sender<Message>,
 ) -> Result<CleanReport, String> {
-    let (mut files, mut failed) = populate_paths(path, false, sender.clone());
+    let (files, mut failed) = populate_paths(path, false, sender.clone());
     let mut fail = Vec::new();
     fail.append(&mut failed);
     let _ = sender.send(Message::Log(format!(
         "Starting to sort the files, total files in comparing: {}",
         files.len()
     )));
-    let succ = run_sort(&mut files, num_sorting);
+    let succ = run_sort(files, num_sorting);
     Ok(CleanReport {
         success: (succ),
         errors: fail,
@@ -56,7 +56,7 @@ pub fn run_clean(
     sender: Sender<Message>,
 ) -> (Vec<(String, PathBuf)>, Vec<String>) {
     let files = group_into_similar(files, sender.clone());
-    let files = files.into_iter().filter(|(size, vec)| {
+    let files = files.into_par_iter().filter(|(size, vec)| {
         if *size > 0u64 {
             vec.len() > 1usize
         } else {
@@ -114,18 +114,19 @@ pub fn run_clean(
 
     (succ_fin, fail_fin)
 }
-pub fn run_sort(files: &mut [(u64, PathBuf)], num_sorting: usize) -> Vec<(String, PathBuf)> {
-    let mut res = Vec::new();
+pub fn run_sort(mut files: Vec<(u64, PathBuf)>, num_sorting: usize) -> Vec<(String, PathBuf)> {
     files.sort_by_key(|a| std::cmp::Reverse(a.0));
     let len = num_sorting.min(files.len());
-    for i in 0..len {
-        let curr = files.get(i).unwrap();
-        res.push((
-            format!("{:.2}MB : {:?}", (curr.0 as f64 / 1_000_000.0), curr.1),
-            PathBuf::default(),
-        ))
-    }
-    res
+    files
+        .into_par_iter()
+        .take(len)
+        .map(|f| {
+            (
+                format!("{:.2}MB : {:?}", (f.0 as f64 / 1_000_000.0), f.1),
+                f.1,
+            )
+        })
+        .collect::<Vec<(String, PathBuf)>>()
 }
 
 // When cleaning, we don't want to scan bundles, as those directories usually contain duplicates

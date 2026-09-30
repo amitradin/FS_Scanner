@@ -1,4 +1,3 @@
-use crate::structs_and_enums::Screen::RunningClean;
 use crate::structs_and_enums::{
     Action, App, CleanState, LogState, Message, ResultStatus, Row, RunState, Screen, SortOptions,
     Status,
@@ -190,10 +189,7 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> std::io::Result<()> {
                         }
                     }
 
-                    if key.code == KeyCode::Char('d')
-                        && !app.result_state.fail_focus
-                        && app.came_from == Some(RunningClean)
-                    {
+                    if key.code == KeyCode::Char('d') && !app.result_state.fail_focus {
                         app.result_state.is_popup = !app.result_state.is_popup;
                     }
                 } else {
