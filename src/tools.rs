@@ -12,6 +12,8 @@ use std::sync::mpsc::Sender;
 
 const BUF_SIZE: usize = 1024 * 1024; //1 MB
 
+type ComplaxType = Vec<(Vec<(String, PathBuf)>, Vec<String>)>;
+
 #[derive(Debug)]
 pub struct CleanReport {
     pub success: Vec<(String, PathBuf)>,
@@ -66,7 +68,7 @@ pub fn run_clean(
     let mut fail_fin: Vec<String> = Vec::new();
 
     let groups: Vec<_> = files.collect();
-    let results: Vec<(Vec<(String, PathBuf)>, Vec<String>)> = groups
+    let results: ComplaxType = groups
         .into_par_iter()
         .map(|item| {
             let mut succ = Vec::new();
@@ -292,7 +294,7 @@ fn scan_and_clean(
         sender.clone(),
     ));
     let _ = sender.send(Message::Log(String::from("Starting to scan empty files")));
-    return delete_empty(files, sender.clone());
+    delete_empty(files, sender.clone())
 }
 
 fn read_first_4096_bytes(
@@ -353,7 +355,7 @@ fn delete_empty(
         }
         let metadata = metadata.unwrap();
         if metadata.len() == 0 {
-            succ.push((format!("{:?} : sized 0", &path), path));
+            succ.push((format!("{:?} : sized 0", path), path));
         }
     }
     (succ, fail)
@@ -403,7 +405,7 @@ fn remove_by_hash(paths: Vec<PathBuf>, succ: &mut Vec<(String, PathBuf)>) {
     let first = paths.first().unwrap().clone();
     for element in paths.into_iter().skip(1) {
         succ.push((
-            format!("file \n{:?} \n is equal to \n{:?}\n", &element, first),
+            format!("file \n{:?} \n is equal to \n{:?}\n", element, first),
             element,
         ))
     }
@@ -453,4 +455,8 @@ fn tails_equal(a: &Path, b: &Path, len: u64) -> std::io::Result<bool> {
     file2.seek(SeekFrom::Start(4096))?;
     file1.seek(SeekFrom::Start(4096))?;
     compare_2_files(&mut file1, &mut file2, len as usize - 4096)
+}
+
+pub fn delete_file(path: &PathBuf) -> std::io::Result<()> {
+    std::fs::remove_file(path)
 }

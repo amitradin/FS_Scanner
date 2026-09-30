@@ -3,11 +3,11 @@ use ratatui::{
     prelude::{Buffer, Rect},
     style::{Style, Stylize},
     text::Line,
-    widgets::{Block, List, ListItem, ListState, Paragraph, StatefulWidget, Widget},
+    widgets::{Block, Clear, List, ListItem, ListState, Paragraph, StatefulWidget, Widget},
 };
 
 use crate::structs_and_enums::{
-    CleanState, MENU_ITEMS, ResultStatus, Row, RunState, SortOptions, Status,
+    CleanState, MENU_ITEMS, ResultStatus, Row, RunState, Screen, SortOptions, Status,
 };
 
 use ratatui_spinner::LinearSpinner;
@@ -161,7 +161,7 @@ pub fn render_running_clean(
 }
 
 pub fn render_results_screen(
-    title_str: &str,
+    screen: Option<Screen>,
     buf: &mut Buffer,
     results: &mut ResultStatus,
     state: &Status,
@@ -169,7 +169,20 @@ pub fn render_results_screen(
     body: Rect,
     footer: Rect,
 ) {
-    Line::from(title_str).bold().centered().render(title, buf);
+    match screen {
+        Some(valid) => match valid {
+            Screen::RunningClean => Line::from("Clean Results")
+                .bold()
+                .centered()
+                .render(title, buf),
+            Screen::RunnignSort => Line::from("Sort Results")
+                .bold()
+                .centered()
+                .render(title, buf),
+            _ => (),
+        },
+        _ => (),
+    }
 
     if let Status::Failed(s) = state {
         Paragraph::new(
@@ -230,9 +243,40 @@ pub fn render_results_screen(
     StatefulWidget::render(succ_items, succ_area, buf, &mut results.pos_succ);
     StatefulWidget::render(err_items, fail_area, buf, &mut results.pos_fail);
 
-    Paragraph::new(Line::from(
-        "q - quit       J/DownArrow - Move Down       K/UpArrow - Move Up       Tab - Switch between success/error       l - Log Screen       ESC - Main Menu",
-    ).bold().centered()).block(Block::bordered()).render(footer, buf);
+    if results.is_popup {
+        let popup_block = Block::bordered()
+            .title("Are you sure you want to delete?")
+            .style(Style::new().red());
+        let centered_area = body.centered(Constraint::Percentage(30), Constraint::Percentage(20));
+        Widget::render(Clear, centered_area, buf);
+        Paragraph::new("y - yes   n - no")
+            .centered()
+            .bold()
+            .block(popup_block)
+            .render(centered_area, buf);
+    }
+
+    let mut footer_lines = vec![Line::from(String::from(
+        "q - quit       J/DownArrow - Move Down       K/UpArrow - Move Up       Tab - Switch between success/error       l - Log Screen        ESC - Main Menu",
+    )).centered().bold()];
+
+    if !results.fail_focus
+        && screen == Some(Screen::RunningClean)
+        && let Some((_, path)) = results
+            .pos_succ
+            .selected()
+            .and_then(|i| report.success.get(i))
+    {
+        footer_lines.push(
+            Line::from(format!("\nd - delete {:?}", path))
+                .centered()
+                .bold(),
+        );
+    }
+
+    Paragraph::new(footer_lines)
+        .block(Block::bordered())
+        .render(footer, buf);
 }
 
 pub fn render_sort_options(

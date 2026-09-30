@@ -16,6 +16,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         sort: SortOptions::new(String::from("")),
         run_state: RunState::default(),
         curr_screen: Screen::Main,
+        came_from: None,
         result_state: ResultStatus::default(),
         log: LogState::default(),
     };

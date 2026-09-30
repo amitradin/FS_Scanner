@@ -16,6 +16,7 @@ use std::time::Duration;
 
 use crate::key_handler::handle_key;
 use crate::tools::CleanReport;
+
 // The main struct.Hold info about the state of the entire TUI
 pub struct App {
     pub exit: bool,
@@ -26,6 +27,7 @@ pub struct App {
     pub curr_screen: Screen,
     pub result_state: ResultStatus,
     pub log: LogState,
+    pub came_from: Option<Screen>,
 }
 
 /// This struct saves the state of the current running clean job
@@ -87,6 +89,7 @@ pub struct ResultStatus {
     pub pos_fail: ListState,
     pub output: Option<CleanReport>,
     pub fail_focus: bool,
+    pub is_popup: bool,
 }
 
 /// CurrentS screen selected
@@ -272,10 +275,8 @@ impl CleanState {
         }
     }
     // Maps row to a label (Becuase only toggles will show up in the list We only worry about them)
-    pub fn label(&self, row: Row) -> String {
-        match row {
-            _ => String::from(""),
-        }
+    pub fn label(&self) -> String {
+        String::from("")
     }
     // On each action we should mutate the state of the struct
     pub fn activate(&mut self) -> Action {
@@ -468,7 +469,7 @@ impl Widget for &mut App {
                 render_running_clean("Running Sort", buf, &self.run_state, title, body, footer)
             }
             Screen::CleanResults => render_results_screen(
-                "Clean results",
+                self.came_from,
                 buf,
                 &mut self.result_state,
                 &self.run_state.status,

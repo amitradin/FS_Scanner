@@ -1,8 +1,9 @@
+use crate::structs_and_enums::Screen::RunningClean;
 use crate::structs_and_enums::{
     Action, App, CleanState, LogState, Message, ResultStatus, Row, RunState, Screen, SortOptions,
     Status,
 };
-use crate::tools::{clean_main, sort_main};
+use crate::tools::{clean_main, delete_file, sort_main};
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use std::sync::mpsc;
 
@@ -53,6 +54,7 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> std::io::Result<()> {
                                 let res = sort_main(&p, num.unwrap_or(20), sender.clone());
                                 let _ = sender.send(Message::Done(res));
                             });
+                            app.came_from = Some(Screen::RunnignSort);
                             app.curr_screen = Screen::RunnignSort;
                         }
                         _ => (),
@@ -133,6 +135,7 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> std::io::Result<()> {
                                     let res = clean_main(&path, sender.clone());
                                     let _ = sender.send(Message::Done(res));
                                 });
+                                app.came_from = Some(Screen::RunningClean);
                                 app.curr_screen = Screen::RunningClean;
                             }
                         }
@@ -158,29 +161,72 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> std::io::Result<()> {
                     app.run_state = RunState::default();
                     app.result_state = ResultStatus::default();
                     app.log = LogState::default();
+                    app.came_from = None;
                 }
                 if key.code == KeyCode::Char('q') {
                     app.exit = true;
                 }
-                if key.code == KeyCode::Char('j') || key.code == KeyCode::Down {
-                    app.result_state.next();
-                }
-                if key.code == KeyCode::Char('k') || key.code == KeyCode::Up {
-                    app.result_state.prev();
-                }
-                if key.code == KeyCode::Tab {
-                    app.result_state.fail_focus = !app.result_state.fail_focus;
-                }
-                if key.code == KeyCode::PageUp {
-                    app.result_state.reset_to_zero();
-                }
-                if key.code == KeyCode::PageDown {
-                    app.result_state.move_to_end();
-                }
-                if key.code == KeyCode::Char('l') {
-                    app.curr_screen = Screen::Log;
-                    if !app.run_state.log_lines.is_empty() {
-                        app.log.list.select(Some(0));
+                if !app.result_state.is_popup {
+                    if key.code == KeyCode::Char('j') || key.code == KeyCode::Down {
+                        app.result_state.next();
+                    }
+                    if key.code == KeyCode::Char('k') || key.code == KeyCode::Up {
+                        app.result_state.prev();
+                    }
+                    if key.code == KeyCode::Tab {
+                        app.result_state.fail_focus = !app.result_state.fail_focus;
+                    }
+                    if key.code == KeyCode::PageUp {
+                        app.result_state.reset_to_zero();
+                    }
+                    if key.code == KeyCode::PageDown {
+                        app.result_state.move_to_end();
+                    }
+                    if key.code == KeyCode::Char('l') {
+                        app.curr_screen = Screen::Log;
+                        if !app.run_state.log_lines.is_empty() {
+                            app.log.list.select(Some(0));
+                        }
+                    }
+
+                    if key.code == KeyCode::Char('d')
+                        && !app.result_state.fail_focus
+                        && app.came_from == Some(RunningClean)
+                    {
+                        app.result_state.is_popup = !app.result_state.is_popup;
+                    }
+                } else {
+                    if key.code == KeyCode::Char('y') {
+                        let curr_index = app.result_state.pos_succ.selected();
+                        if curr_index.is_none() {
+                            app.result_state.is_popup = !app.result_state.is_popup;
+                            return Ok(());
+                        }
+                        let curr_index = curr_index.unwrap();
+                        let report = app.result_state.output.as_mut();
+                        if report.is_none() {
+                            app.result_state.is_popup = !app.result_state.is_popup;
+                            return Ok(());
+                        }
+
+                        if let Some(valid_report) = report {
+                            let path = &valid_report.success[curr_index].1;
+                            if let Ok(()) = delete_file(path) {
+                                if curr_index == valid_report.success.len() - 1 {
+                                    if curr_index > 0 {
+                                        app.result_state.pos_succ.select(Some(curr_index - 1));
+                                    } else {
+                                        app.result_state.pos_succ.select(None);
+                                    }
+                                }
+                                valid_report.success.remove(curr_index);
+                            }
+                        }
+
+                        app.result_state.is_popup = !app.result_state.is_popup
+                    }
+                    if key.code == KeyCode::Char('n') {
+                        app.result_state.is_popup = !app.result_state.is_popup;
                     }
                 }
             }
