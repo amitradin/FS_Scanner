@@ -6,6 +6,7 @@ use crate::structs_and_enums::{
 use crate::tools::{clean_main, delete_file, sort_main};
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use std::sync::mpsc;
+use std::time::Instant;
 
 ///Key Hanlding logic
 pub fn handle_key(app: &mut App, key: KeyEvent) -> std::io::Result<()> {
@@ -196,6 +197,10 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> std::io::Result<()> {
                         app.result_state.is_popup = !app.result_state.is_popup;
                     }
                 } else {
+                    // the delete result is showing, wait for it to close by itself
+                    if app.result_state.delete_msg.is_some() {
+                        return Ok(());
+                    }
                     if key.code == KeyCode::Char('y') {
                         let curr_index = app.result_state.pos_succ.selected();
                         if curr_index.is_none() {
@@ -210,20 +215,24 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> std::io::Result<()> {
                         }
 
                         if let Some(valid_report) = report {
-                            let path = &valid_report.success[curr_index].1;
-                            if let Ok(()) = delete_file(path) {
-                                if curr_index == valid_report.success.len() - 1 {
-                                    if curr_index > 0 {
-                                        app.result_state.pos_succ.select(Some(curr_index - 1));
-                                    } else {
-                                        app.result_state.pos_succ.select(None);
+                            let path = valid_report.success[curr_index].1.clone();
+                            let msg = match delete_file(&path) {
+                                Ok(()) => {
+                                    if curr_index == valid_report.success.len() - 1 {
+                                        if curr_index > 0 {
+                                            app.result_state.pos_succ.select(Some(curr_index - 1));
+                                        } else {
+                                            app.result_state.pos_succ.select(None);
+                                        }
                                     }
+                                    valid_report.success.remove(curr_index);
+                                    Ok(format!("Deleted {}", path.display()))
                                 }
-                                valid_report.success.remove(curr_index);
-                            }
+                                Err(e) => Err(format!("Could not delete {}: {e}", path.display())),
+                            };
+                            // the popup stays open to show the message, expire_delete_msg closes it
+                            app.result_state.delete_msg = Some((msg, Instant::now()));
                         }
-
-                        app.result_state.is_popup = !app.result_state.is_popup
                     }
                     if key.code == KeyCode::Char('n') {
                         app.result_state.is_popup = !app.result_state.is_popup;

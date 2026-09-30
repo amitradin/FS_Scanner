@@ -12,7 +12,7 @@ use std::io;
 use std::sync::mpsc::{self, TryRecvError};
 
 use crossterm::event;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::key_handler::handle_key;
 use crate::tools::CleanReport;
@@ -90,6 +90,8 @@ pub struct ResultStatus {
     pub output: Option<CleanReport>,
     pub fail_focus: bool,
     pub is_popup: bool,
+    // result of the last delete (Ok = success text, Err = error text) and when it happened
+    pub delete_msg: Option<(Result<String, String>, Instant)>,
 }
 
 /// CurrentS screen selected
@@ -374,6 +376,7 @@ impl App {
                 handle_key(self, key)?
             }
             self.drain();
+            self.result_state.expire_delete_msg();
         }
 
         Ok(())
@@ -491,6 +494,16 @@ impl Widget for &mut App {
 }
 
 impl ResultStatus {
+    // closes the delete popup once its result message was shown for half a second
+    pub fn expire_delete_msg(&mut self) {
+        if let Some((_, at)) = &self.delete_msg
+            && at.elapsed() >= Duration::from_millis(500)
+        {
+            self.delete_msg = None;
+            self.is_popup = false;
+        }
+    }
+
     pub fn next(&mut self) {
         if self.output.is_none() {
             return;

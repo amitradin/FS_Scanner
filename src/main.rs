@@ -5,6 +5,7 @@ use crate::structs_and_enums::{
 
 mod key_handler;
 mod screens;
+mod theme;
 mod tools;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
