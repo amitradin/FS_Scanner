@@ -3,7 +3,8 @@
 A small Rust terminal UI (built with [ratatui](https://ratatui.rs)) for finding what's taking up disk space. It can find byte-identical duplicates and empty files, list the largest files under a directory, or let you browse the whole file system sorted by size. In every mode you can delete files one at a time.
 
 Example of FS Walk:
-https://github.com/user-attachments/assets/60f1e84f-9670-4024-8ead-0ad88fc96a83
+<img width="1280" height="720" alt="rec" src="https://github.com/user-attachments/assets/5b01e313-264c-4d8c-810d-a198013af7ff" />
+
 
 
 ## Build and run
