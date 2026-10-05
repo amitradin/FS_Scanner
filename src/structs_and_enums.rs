@@ -49,7 +49,7 @@ pub struct RunState {
 }
 
 // Menu items of the main menu
-pub const MENU_ITEMS: [&str; 3] = ["Clean", "Sort", "FS Walk"];
+pub const MENU_ITEMS: [&str; 3] = ["Find Dups", "Sort", "FS Walk"];
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub struct MenuState {
     pub list: ListState,
@@ -117,6 +117,7 @@ pub struct WalkView {
     pub rx: Option<Receiver<Option<Walk>>>,
     pub tick: u64,
     pub is_popup: bool,
+    pub delete_msg: Option<(Result<String, String>, Instant)>,
 }
 
 impl WalkView {
@@ -140,7 +141,7 @@ impl WalkView {
                 .current()
                 .children
                 .as_ref()
-                .is_some_and(|c| c[i].is_dir)
+                .is_some_and(|c| c.get(i).is_some_and(|w| w.is_dir))
         {
             self.stack.push(i);
             self.list.select(Some(0));
@@ -203,8 +204,20 @@ impl WalkView {
         let size = curr_walk_file.size;
         let res = std::fs::remove_file(&curr_walk_file.path);
 
-        if let Err(_) = res {
-            return;
+        match res {
+            Ok(_) => {
+                self.delete_msg = Some((
+                    Ok(format!("Deleted {:?}", &curr_walk_file.path)),
+                    Instant::now(),
+                ));
+            }
+            Err(e) => {
+                self.delete_msg = Some((
+                    Err(format!("Could not delete {:?}: {e}", &curr_walk_file.path)),
+                    Instant::now(),
+                ));
+                return;
+            }
         }
 
         let children = self.current_mut().children.as_mut().unwrap();
@@ -233,6 +246,15 @@ impl WalkView {
         let len = self.len();
         self.list
             .select(if len == 0 { None } else { Some(len - 1) });
+    }
+
+    pub fn expire_delete_msg(&mut self) {
+        if let Some((_, at)) = &self.delete_msg
+            && at.elapsed() >= Duration::from_secs(1)
+        {
+            self.delete_msg = None;
+            self.is_popup = false;
+        }
     }
 }
 
@@ -510,6 +532,20 @@ impl Row {
 
 impl App {
     // Runs the app
+    pub fn new() -> Self {
+        App {
+            exit: false,
+            menu: MenuState::new(),
+            clean: CleanState::new(String::from("")),
+            sort: SortOptions::new(String::from("")),
+            run_state: RunState::default(),
+            curr_screen: Screen::Main,
+            came_from: None,
+            result_state: ResultStatus::default(),
+            log: LogState::default(),
+            walk: WalkView::default(),
+        }
+    }
     pub fn run(&mut self, terminal: &mut DefaultTerminal) -> io::Result<()> {
         while !self.exit {
             terminal.draw(|frame| self.draw(frame))?;
@@ -525,10 +561,10 @@ impl App {
                 Screen::RunningClean => self.drain(),
                 Screen::RunnignSort => self.drain(),
                 Screen::Loading => self.drain_walk(),
+                Screen::CleanResults => self.result_state.expire_delete_msg(),
+                Screen::Walk => self.walk.expire_delete_msg(),
                 _ => (),
             }
-
-            self.result_state.expire_delete_msg();
         }
 
         Ok(())
@@ -680,7 +716,7 @@ impl ResultStatus {
     // closes the delete popup once its result message was shown for half a second
     pub fn expire_delete_msg(&mut self) {
         if let Some((_, at)) = &self.delete_msg
-            && at.elapsed() >= Duration::from_millis(500)
+            && at.elapsed() >= Duration::from_secs(1)
         {
             self.delete_msg = None;
             self.is_popup = false;

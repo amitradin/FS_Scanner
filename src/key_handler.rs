@@ -182,7 +182,7 @@ fn handle_clean_options(app: &mut App, key: KeyEvent) {
 
 fn handle_clean_results(app: &mut App, key: KeyEvent) {
     if key.code == KeyCode::Esc {
-        *app = App::default();
+        *app = App::new();
     }
     if key.code == KeyCode::Char('q') {
         app.exit = true;
@@ -277,9 +277,7 @@ fn handle_walk(app: &mut App, key: KeyEvent) {
     }
     if !app.walk.is_popup {
         if key.code == KeyCode::Esc {
-            app.walk = WalkView::default();
-            app.curr_screen = Screen::Main;
-            *app = App::default();
+            *app = App::new();
         } else if key.code == KeyCode::Enter || key.code == KeyCode::Char('l') {
             app.walk.enter();
         } else if key.code == KeyCode::Char('h') {
@@ -310,8 +308,11 @@ fn handle_walk(app: &mut App, key: KeyEvent) {
         }
     } else {
         if key.code == KeyCode::Char('y') {
+            // We don't want to double delete
+            if app.walk.delete_msg.is_some() {
+                return;
+            }
             app.walk.handle_delete();
-            app.walk.is_popup = !app.walk.is_popup;
         } else if key.code == KeyCode::Char('n') {
             app.walk.is_popup = !app.walk.is_popup;
         }

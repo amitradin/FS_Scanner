@@ -531,22 +531,45 @@ pub fn render_walk(
     StatefulWidget::render(list, body, buf, &mut options.list);
 
     if options.is_popup {
-        let path = options.current().children.as_ref().unwrap()[options.list.selected().unwrap()]
-            .path
-            .to_str()
-            .unwrap_or_default();
-        let (popup_block, popup_panal) = (
-            focused_panel("⚠ Delete this file?", ERR),
-            vec![
-                Line::from(""),
-                Line::from(path).bold(),
-                Line::from(""),
-                key_hints(&[("y", "yes, delete"), ("n", "cancel")]),
-            ],
-        );
+        let (popup_block, popup_lines) = match &options.delete_msg {
+            Some((Ok(msg), _)) => (
+                focused_panel("✔ Deleted", OK),
+                vec![Line::from(""), Line::from(format!("✔ {msg}")).fg(OK).bold()],
+            ),
+            Some((Err(msg), _)) => (
+                focused_panel("✖ Delete failed", ERR),
+                vec![
+                    Line::from(""),
+                    Line::from(format!("✖ {msg}")).fg(ERR).bold(),
+                ],
+            ),
+            None => {
+                let path = options
+                    .list
+                    .selected()
+                    .and_then(|i| {
+                        options
+                            .current()
+                            .children
+                            .as_ref()
+                            .and_then(|child| child.get(i))
+                    })
+                    .and_then(|w| w.path.to_str())
+                    .unwrap_or_default();
+                (
+                    focused_panel("⚠ Delete this file?", ERR),
+                    vec![
+                        Line::from(""),
+                        Line::from(path).bold(),
+                        Line::from(""),
+                        key_hints(&[("y", "yes, delete"), ("n", "cancel")]),
+                    ],
+                )
+            }
+        };
         let centered_area = body.centered(Constraint::Percentage(60), Constraint::Length(7));
         Widget::render(Clear, centered_area, buf);
-        Paragraph::new(popup_panal)
+        Paragraph::new(popup_lines)
             .centered()
             .wrap(Wrap { trim: true })
             .block(popup_block)
