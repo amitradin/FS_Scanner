@@ -5,7 +5,10 @@ use ratatui::{
     layout::{Constraint, Layout},
     prelude::{Buffer, Rect},
 };
-use std::path::PathBuf;
+use std::cmp::Reverse;
+use std::fs::Metadata;
+use std::os::unix::fs::MetadataExt;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::Receiver;
 
 use std::io;
@@ -16,8 +19,10 @@ use std::time::{Duration, Instant};
 
 use crate::key_handler::handle_key;
 use crate::tools::CleanReport;
+use rayon::prelude::*;
 
 // The main struct.Hold info about the state of the entire TUI
+#[derive(Default)]
 pub struct App {
     pub exit: bool,
     pub menu: MenuState,
@@ -28,6 +33,7 @@ pub struct App {
     pub result_state: ResultStatus,
     pub log: LogState,
     pub came_from: Option<Screen>,
+    pub walk: WalkView,
 }
 
 /// This struct saves the state of the current running clean job
@@ -43,8 +49,8 @@ pub struct RunState {
 }
 
 // Menu items of the main menu
-pub const MENU_ITEMS: [&str; 2] = ["Clean", "Sort"];
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub const MENU_ITEMS: [&str; 3] = ["Clean", "Sort", "FS Walk"];
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub struct MenuState {
     pub list: ListState,
 }
@@ -55,7 +61,7 @@ pub struct LogState {
 }
 
 // Holds the data about the clean screen
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub struct CleanState {
     pub real_run: bool,
     pub remove_empty: bool,
@@ -65,6 +71,7 @@ pub struct CleanState {
 }
 
 // Holds the data about the sorting path and num of files to show
+#[derive(Default)]
 pub struct SortOptions {
     pub path: String,
     pub num_show: String,
@@ -94,9 +101,145 @@ pub struct ResultStatus {
     pub delete_msg: Option<(Result<String, String>, Instant)>,
 }
 
+#[derive(Default, Debug)]
+pub struct Walk {
+    pub path: PathBuf,
+    pub children: Option<Vec<Walk>>,
+    pub size: u64,
+    pub is_dir: bool,
+}
+
+#[derive(Default)]
+pub struct WalkView {
+    pub root: Walk,
+    pub stack: Vec<usize>,
+    pub list: ListState,
+    pub rx: Option<Receiver<Option<Walk>>>,
+    pub tick: u64,
+    pub is_popup: bool,
+}
+
+impl WalkView {
+    pub fn current(&self) -> &Walk {
+        //unwrap should not fail since those are walked indecies
+        self.stack
+            .iter()
+            .fold(&self.root, |w, i| &w.children.as_ref().unwrap()[*i])
+    }
+
+    pub fn current_mut(&mut self) -> &mut Walk {
+        self.stack
+            .iter()
+            .fold(&mut self.root, |w, i| &mut w.children.as_mut().unwrap()[*i])
+    }
+
+    pub fn enter(&mut self) {
+        // we have an index and, we have children and the i'th child is a directory
+        if let Some(i) = self.list.selected()
+            && self
+                .current()
+                .children
+                .as_ref()
+                .is_some_and(|c| c[i].is_dir)
+        {
+            self.stack.push(i);
+            self.list.select(Some(0));
+        }
+    }
+    pub fn leave(&mut self) {
+        if let Some(i) = self.stack.pop() {
+            self.list.select(Some(i));
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.current().children.as_ref().map_or(0, |c| c.len())
+    }
+
+    pub fn next(&mut self) {
+        let len = self.len();
+        if len == 0 {
+            return;
+        }
+        if let Some(i) = self.list.selected() {
+            if i >= self.current().children.as_ref().unwrap().len() - 1 {
+                self.list.select(Some(0));
+            } else {
+                self.list.select(Some(i + 1))
+            }
+        }
+    }
+
+    pub fn prev(&mut self) {
+        let len = self.len();
+        if len == 0 {
+            return;
+        }
+        if let Some(i) = self.list.selected() {
+            if i == 0 {
+                self.list.select(Some(len - 1));
+            } else {
+                self.list.select(Some(i - 1))
+            }
+        }
+    }
+
+    pub fn handle_delete(&mut self) {
+        if self.list.selected().is_none() {
+            return;
+        }
+
+        let index = self.list.selected().unwrap();
+        let current = self.current().children.as_ref().unwrap();
+        let curr_walk_file = current.get(index);
+
+        // We only want to delete a file and not a folder
+        if curr_walk_file.is_none() || curr_walk_file.unwrap().is_dir {
+            return;
+        }
+
+        // now we know it is a file, so we want to both delete and propagate the size change upwards
+        let curr_walk_file = curr_walk_file.unwrap();
+        let size = curr_walk_file.size;
+        let res = std::fs::remove_file(&curr_walk_file.path);
+
+        if let Err(_) = res {
+            return;
+        }
+
+        let children = self.current_mut().children.as_mut().unwrap();
+        let len = children.len() - 1;
+
+        children.remove(index);
+
+        for i in 0..=self.stack.len() {
+            let curr = self.stack[0..i]
+                .iter()
+                .fold(&mut self.root, |w, i| &mut w.children.as_mut().unwrap()[*i]);
+            curr.size -= size;
+        }
+
+        self.list.select(if len == 0 {
+            None
+        } else {
+            Some(index.min(len - 1))
+        });
+    }
+
+    pub fn begin(&mut self) {
+        self.list.select(Some(0));
+    }
+    pub fn end(&mut self) {
+        let len = self.len();
+        self.list
+            .select(if len == 0 { None } else { Some(len - 1) });
+    }
+}
+
 /// CurrentS screen selected
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Default)]
 pub enum Screen {
+    #[default]
     Main,
     CleanOptions,
     RunningClean,
@@ -104,6 +247,8 @@ pub enum Screen {
     SortOptions,
     RunnignSort,
     Log,
+    Loading,
+    Walk,
 }
 
 /// Holds data that the sender sends from the cleaning job  
@@ -126,8 +271,9 @@ pub enum Action {
 }
 
 // All of the options of Clean options screen
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Row {
+    #[default]
     Path,
     Run,
 }
@@ -373,9 +519,15 @@ impl App {
             if event::poll(Duration::from_millis(100))?
                 && let crossterm::event::Event::Key(key) = crossterm::event::read()?
             {
-                handle_key(self, key)?
+                handle_key(self, key)
             }
-            self.drain();
+            match self.curr_screen {
+                Screen::RunningClean => self.drain(),
+                Screen::RunnignSort => self.drain(),
+                Screen::Loading => self.drain_walk(),
+                _ => (),
+            }
+
             self.result_state.expire_delete_msg();
         }
 
@@ -385,7 +537,29 @@ impl App {
     pub fn draw(&mut self, frame: &mut Frame) {
         frame.render_widget(self, frame.area());
     }
-    // handdles key press
+
+    pub fn drain_walk(&mut self) {
+        self.walk.tick += 1;
+        let mut message = self.walk.rx.take();
+        if message.is_some() {
+            //Sender Only sends 1 message, so no need for a loop.
+            let res = message.as_ref().unwrap().try_recv();
+            match res {
+                Ok(result) => {
+                    if result.is_none() {
+                        self.exit = true;
+                    } else {
+                        self.curr_screen = Screen::Walk;
+                        self.walk.root = result.unwrap();
+                        self.walk.list.select(Some(0));
+                    }
+                }
+                Err(TryRecvError::Empty) => self.walk.rx = message.take(),
+                Err(TryRecvError::Disconnected) => self.exit = true,
+            }
+        } else {
+        }
+    }
 
     /// drains the receiver end of the channel.
     pub fn drain(&mut self) {
@@ -489,6 +663,15 @@ impl Widget for &mut App {
                 body,
                 footer,
             ),
+            Screen::Loading => render_load(
+                "Mapping the file system",
+                buf,
+                self.walk.tick,
+                title,
+                body,
+                footer,
+            ),
+            Screen::Walk => render_walk("Walk", buf, &mut self.walk, title, body, footer),
         }
     }
 }
@@ -618,5 +801,83 @@ impl LogState {
             return;
         }
         self.list.select(Some(0));
+    }
+}
+
+const SKIP_FROM_ROOT: &[&str] = &[
+    "/System/Volumes",
+    "/Volumes",
+    "/dev",
+    "/.nofollow",
+    "/.resolve",
+    "/.vol",
+];
+
+impl Walk {
+    pub fn populate() -> Option<Self> {
+        let root = PathBuf::from("/");
+        let meta = std::fs::symlink_metadata(&root).ok()?;
+        let root = Self::populate_with_root_recursive(&root, meta);
+        Some(root)
+    }
+    fn populate_with_root_recursive(path: &Path, meta: Metadata) -> Self {
+        if !path.is_dir() {
+            Walk {
+                path: path.to_owned(),
+                children: None,
+                size: meta.blocks() * 512,
+                is_dir: false,
+            }
+        } else {
+            let enteries = match std::fs::read_dir(path) {
+                Ok(rd) => rd.filter_map(|entry| entry.ok()).collect(),
+                Err(_) => Vec::new(),
+            };
+            // We want to use multiple threads, so we need to first collect into a vector, and
+            // then we can use par_iter on it. Otherwise, par_iter isn't available on the `ReadDir` Struct
+            let mut children = enteries
+                .into_par_iter()
+                .filter_map(|valid| {
+                    let meta = valid.metadata().ok()?;
+
+                    // Skipping symlinks
+                    if meta.file_type().is_symlink() {
+                        return None;
+                    }
+
+                    let path = valid.path();
+                    // Skipping the duplicates
+                    if meta.is_dir() && SKIP_FROM_ROOT.iter().any(|s| path == Path::new(s)) {
+                        return None;
+                    }
+
+                    Some(Self::populate_with_root_recursive(&path, meta))
+                })
+                .collect::<Vec<Walk>>();
+
+            children.sort_unstable_by_key(|c| Reverse(c.size));
+
+            let size: u64 = meta.blocks() * 512 + children.par_iter().map(|w| w.size).sum::<u64>();
+            let curr = Walk {
+                path: path.to_owned(),
+                children: Some(children),
+                size: size,
+                is_dir: true,
+            };
+            curr
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Scans the whole FS, so it's slow. Run with `cargo test -- --ignored`
+    #[test]
+    #[ignore]
+    fn test_walk_creation() {
+        let test = Walk::populate();
+        println!("root size is , {}", test.unwrap().size);
     }
 }

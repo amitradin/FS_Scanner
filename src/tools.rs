@@ -1,5 +1,4 @@
 use std::collections::{HashMap, hash_map};
-use std::fs;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::os::unix::fs::MetadataExt;
@@ -20,6 +19,7 @@ pub struct CleanReport {
     pub errors: Vec<String>,
 }
 
+/// Finds and gruops duplicate files (By Bytes)
 pub fn clean_main(path: &Path, sender: Sender<Message>) -> Result<CleanReport, String> {
     let mut fail = Vec::new();
     let _ = sender.send(Message::Log(String::from("Starting to populate paths")));
@@ -33,6 +33,7 @@ pub fn clean_main(path: &Path, sender: Sender<Message>) -> Result<CleanReport, S
     })
 }
 
+/// return the top n largets files in the FS from given root
 pub fn sort_main(
     path: &Path,
     num_sorting: usize,
@@ -115,7 +116,7 @@ pub fn run_clean(
     (succ_fin, fail_fin)
 }
 pub fn run_sort(mut files: Vec<(u64, PathBuf)>, num_sorting: usize) -> Vec<(String, PathBuf)> {
-    files.sort_by_key(|a| std::cmp::Reverse(a.0));
+    files.sort_unstable_by_key(|a| std::cmp::Reverse(a.0));
     let len = num_sorting.min(files.len());
     files
         .into_par_iter()
@@ -180,7 +181,7 @@ fn scan_dir(
     let mut subdirs = Vec::new();
     let mut err = Vec::new();
     let _ = sender.send(Message::Log(format!("Starting to scan {:?}", dir)));
-    let entries = match fs::read_dir(dir) {
+    let entries = match std::fs::read_dir(dir) {
         Ok(entries) => entries,
         Err(e) => {
             err.push(format!("Could not read {:?}, got an error {e}", dir));

@@ -7,7 +7,7 @@ use ratatui::{
 };
 
 use crate::structs_and_enums::{
-    CleanState, MENU_ITEMS, ResultStatus, Row, RunState, Screen, SortOptions, Status,
+    CleanState, MENU_ITEMS, ResultStatus, Row, RunState, Screen, SortOptions, Status, WalkView,
 };
 
 use crate::theme::{
@@ -18,7 +18,11 @@ use ratatui_spinner::LinearSpinner;
 
 /// rendering the main screen function
 pub fn render_menu(buf: &mut Buffer, state: &mut ListState, title: Rect, body: Rect, footer: Rect) {
-    let descriptions = ["Find duplicate files", "Show the largest files in a folder"];
+    let descriptions = [
+        "Find duplicate files",
+        "Show the largest files in a folder",
+        "Walk through the file system by size",
+    ];
     let items = MENU_ITEMS
         .into_iter()
         .zip(descriptions)
@@ -483,4 +487,107 @@ pub fn render_log(
     ]))
     .block(footer_panel())
     .render(footer, buf);
+}
+
+pub fn render_walk(
+    title_str: &str,
+    buf: &mut Buffer,
+    options: &mut WalkView,
+    title: Rect,
+    body: Rect,
+    footer: Rect,
+) {
+    title_bar(title_str).render(title, buf);
+    let list = options
+        .current()
+        .children
+        .as_ref()
+        .unwrap()
+        .iter()
+        .map(|child| {
+            let size = if child.size < 10u64.pow(9) {
+                format!(
+                    "{:.2}MB : {:?}",
+                    child.size as f64 / 1_000_000.0,
+                    child.path
+                )
+            } else {
+                format!(
+                    "{:.2}GB : {:?}",
+                    child.size as f64 / 1_000_000_000.0,
+                    child.path
+                )
+            };
+            if child.is_dir {
+                ListItem::new(size).bold()
+            } else {
+                ListItem::new(size).bold().fg(MUTED)
+            }
+        })
+        .collect::<List>()
+        .highlight_style(highlight())
+        .highlight_symbol(" ▶ ")
+        .block(Block::bordered());
+    StatefulWidget::render(list, body, buf, &mut options.list);
+
+    if options.is_popup {
+        let path = options.current().children.as_ref().unwrap()[options.list.selected().unwrap()]
+            .path
+            .to_str()
+            .unwrap_or_default();
+        let (popup_block, popup_panal) = (
+            focused_panel("⚠ Delete this file?", ERR),
+            vec![
+                Line::from(""),
+                Line::from(path).bold(),
+                Line::from(""),
+                key_hints(&[("y", "yes, delete"), ("n", "cancel")]),
+            ],
+        );
+        let centered_area = body.centered(Constraint::Percentage(60), Constraint::Length(7));
+        Widget::render(Clear, centered_area, buf);
+        Paragraph::new(popup_panal)
+            .centered()
+            .wrap(Wrap { trim: true })
+            .block(popup_block)
+            .render(centered_area, buf);
+    }
+
+    Paragraph::new(key_hints(&[
+        ("q", "quit"),
+        ("Esc", "Main"),
+        ("j/↓/Tab", "down"),
+        ("k/↑/BackTab", "up"),
+        ("PgUp/PgDn", "top/bottom"),
+        ("L/Enter", "Go Into"),
+        ("h", "Go Out Of"),
+        ("d", "delete file (Will only work on a file)"),
+    ]))
+    .block(footer_panel())
+    .render(footer, buf);
+}
+
+pub fn render_load(
+    title_str: &str,
+    buf: &mut Buffer,
+    tick: u64,
+    title: Rect,
+    body: Rect,
+    footer: Rect,
+) {
+    title_bar(title_str).render(title, buf);
+
+    let spinner = LinearSpinner::new(tick)
+        .total_slots(10)
+        .active_color(ACCENT);
+
+    let loading_split = Layout::horizontal([Constraint::Length((12) as u16), Constraint::Min(0)]);
+
+    let [text, spinner_area] = loading_split.areas(body);
+    Line::from("Loading".fg(MUTED)).bold().render(text, buf);
+    spinner.render(spinner_area, buf);
+
+    Paragraph::new(key_hints(&[("q", "quit")]))
+        .block(footer_panel())
+        .render(footer, buf);
 }
