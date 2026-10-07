@@ -192,28 +192,30 @@ impl WalkView {
 
         let index = self.list.selected().unwrap();
         let current = self.current().children.as_ref().unwrap();
-        let curr_walk_file = current.get(index);
 
-        // We only want to delete a file and not a folder
-        if curr_walk_file.is_none() || curr_walk_file.unwrap().is_dir {
+        let Some(curr_walk_file) = current.get(index) else {
             return;
-        }
+        };
 
         // now we know it is a file, so we want to both delete and propagate the size change upwards
-        let curr_walk_file = curr_walk_file.unwrap();
         let size = curr_walk_file.size;
-        let res = std::fs::remove_file(&curr_walk_file.path);
+
+        let res = if !curr_walk_file.is_dir {
+            std::fs::remove_file(&curr_walk_file.path)
+        } else {
+            std::fs::remove_dir_all(&curr_walk_file.path)
+        };
 
         match res {
             Ok(_) => {
                 self.delete_msg = Some((
-                    Ok(format!("Deleted {:?}", &curr_walk_file.path)),
+                    Ok(format!("Deleted {:?}", curr_walk_file.path)),
                     Instant::now(),
                 ));
             }
             Err(e) => {
                 self.delete_msg = Some((
-                    Err(format!("Could not delete {:?}: {e}", &curr_walk_file.path)),
+                    Err(format!("Could not delete {:?}: {e}", curr_walk_file.path)),
                     Instant::now(),
                 ));
                 return;
@@ -582,18 +584,17 @@ impl App {
             let res = message.as_ref().unwrap().try_recv();
             match res {
                 Ok(result) => {
-                    if result.is_none() {
-                        self.exit = true;
-                    } else {
+                    if let Some(valid) = result {
                         self.curr_screen = Screen::Walk;
-                        self.walk.root = result.unwrap();
+                        self.walk.root = valid;
                         self.walk.list.select(Some(0));
+                    } else {
+                        self.exit = true;
                     }
                 }
                 Err(TryRecvError::Empty) => self.walk.rx = message.take(),
                 Err(TryRecvError::Disconnected) => self.exit = true,
             }
-        } else {
         }
     }
 
@@ -894,13 +895,12 @@ impl Walk {
             children.sort_unstable_by_key(|c| Reverse(c.size));
 
             let size: u64 = meta.blocks() * 512 + children.par_iter().map(|w| w.size).sum::<u64>();
-            let curr = Walk {
+            Walk {
                 path: path.to_owned(),
                 children: Some(children),
-                size: size,
+                size,
                 is_dir: true,
-            };
-            curr
+            }
         }
     }
 }

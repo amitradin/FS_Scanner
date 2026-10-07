@@ -544,7 +544,7 @@ pub fn render_walk(
                 ],
             ),
             None => {
-                let path = options
+                let (path, is_dir) = options
                     .list
                     .selected()
                     .and_then(|i| {
@@ -554,10 +554,17 @@ pub fn render_walk(
                             .as_ref()
                             .and_then(|child| child.get(i))
                     })
-                    .and_then(|w| w.path.to_str())
+                    .map(|w| (w.path.to_str(), w.is_dir))
                     .unwrap_or_default();
+                let path = path.unwrap_or_default();
+                let text = if is_dir {
+                    "⚠ Delete this folder and all of its content?"
+                } else {
+                    "⚠ Delete this file?"
+                };
+
                 (
-                    focused_panel("⚠ Delete this file?", ERR),
+                    focused_panel(text, ERR),
                     vec![
                         Line::from(""),
                         Line::from(path).bold(),
@@ -584,7 +591,10 @@ pub fn render_walk(
         ("PgUp/PgDn", "top/bottom"),
         ("L/Enter", "Go Into"),
         ("h", "Go Out Of"),
-        ("d", "delete file (Will only work on a file)"),
+        (
+            "d",
+            "delete (Deleting a folder will also delete all of its content)",
+        ),
     ]))
     .block(footer_panel())
     .render(footer, buf);
@@ -604,7 +614,7 @@ pub fn render_load(
         .total_slots(10)
         .active_color(ACCENT);
 
-    let loading_split = Layout::horizontal([Constraint::Length((12) as u16), Constraint::Min(0)]);
+    let loading_split = Layout::horizontal([Constraint::Length(12u16), Constraint::Min(0)]);
 
     let [text, spinner_area] = loading_split.areas(body);
     Line::from("Loading".fg(MUTED)).bold().render(text, buf);

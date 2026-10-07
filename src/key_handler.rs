@@ -1,6 +1,4 @@
-use crate::structs_and_enums::{
-    Action, App, Message, Row, RunState, Screen, Status, Walk, WalkView,
-};
+use crate::structs_and_enums::{Action, App, Message, Row, RunState, Screen, Status, Walk};
 use crate::tools::{clean_main, delete_file, sort_main};
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use std::sync::mpsc;
@@ -228,7 +226,6 @@ fn handle_clean_results(app: &mut App, key: KeyEvent) {
             let report = app.result_state.output.as_mut();
             if report.is_none() {
                 app.result_state.is_popup = !app.result_state.is_popup;
-                return;
             } else if let Some(valid_report) = report {
                 let path = valid_report.success[curr_index].1.clone();
                 let msg = match delete_file(&path) {
@@ -302,7 +299,7 @@ fn handle_walk(app: &mut App, key: KeyEvent) {
                 .list
                 .selected()
                 .and_then(|i| app.walk.current().children.as_ref()?.get(i))
-                .is_some_and(|c| !c.is_dir)
+                .is_some()
         {
             app.walk.is_popup = !app.walk.is_popup;
         }
@@ -312,6 +309,7 @@ fn handle_walk(app: &mut App, key: KeyEvent) {
             if app.walk.delete_msg.is_some() {
                 return;
             }
+
             app.walk.handle_delete();
         } else if key.code == KeyCode::Char('n') {
             app.walk.is_popup = !app.walk.is_popup;
